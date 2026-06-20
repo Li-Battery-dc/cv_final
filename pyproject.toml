@@ -1,5 +1,5 @@
 [project]
-name = "vggt-ba-3dgs"
+name = "cv_final_project"
 version = "0.1.0"
 description = "VGGT + Bundle Adjustment + 3D Gaussian Splatting pipeline"
 requires-python = ">=3.10"
@@ -46,11 +46,14 @@ dependencies = [
 
     # 3DGS dependencies
     "gsplat>=1.0",
+
+    # Local feature matching (editable install from packages/LightGlue)
+    "lightglue",
 ]
 
-[tool.uv]
-# PyTorch from pip index, not PyPI
-# Run: uv sync --index-url https://download.pytorch.org/whl/cu128
+[[tool.uv.index]]
+# PyTorch CUDA 12.8 wheelhouse — overlays PyTorch + proxies PyPI
+url = "https://download.pytorch.org/whl/cu128"
 
 [tool.uv.sources]
 lightglue = { path = "packages/LightGlue", editable = true }
@@ -58,3 +61,6 @@ lightglue = { path = "packages/LightGlue", editable = true }
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
