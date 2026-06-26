@@ -43,7 +43,7 @@ echo "  Reproj error:   $MAX_REPROJ_ERROR"
 echo "  Min vis frames: $MIN_VISIBLE_FRAMES"
 echo "============================================"
 
-python scripts/vggt_export.py \
+python -m src.vggt_export \
     --scene_dir "$SCENE_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --stage "$STAGE" \

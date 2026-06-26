@@ -38,14 +38,8 @@ def render_view(
     """
     try:
         from gsplat import rasterization
-    except ImportError:
-        # Fallback: return empty image if gsplat is not installed
-        return {
-            'render': torch.ones(3, height, width, device=model._xyz.device) * (bg_color[0] if bg_color is not None else 0.0),
-            'alpha': torch.zeros(height, width, device=model._xyz.device),
-            'depth': torch.zeros(height, width, device=model._xyz.device),
-            'info': 'gsplat_not_installed',
-        }
+    except ImportError as e:
+        raise RuntimeError("gsplat is required for Gaussian training/rendering") from e
 
     device = model._xyz.device
 
@@ -64,11 +58,14 @@ def render_view(
     if sh_degree is None:
         sh_degree = model.active_sh_degree
 
-    # Get SH coefficients for higher-degree rendering
+    # gsplat expects RGB colors as (N, 3) when sh_degree=None, or SH coeffs
+    # as (N, K, 3) when sh_degree is active.
     if sh_degree > 0 and model._features_rest.numel() > 0:
-        sh_coeffs = model.get_sh_coeffs()  # (N, 3, D)
+        render_colors = model.get_sh_coeffs().permute(0, 2, 1).contiguous()  # (N, K, 3)
+        render_sh_degree = sh_degree
     else:
-        sh_coeffs = colors.unsqueeze(-1)  # (N, 3, 1)
+        render_colors = colors  # (N, 3)
+        render_sh_degree = None
 
     # Build viewmats and Ks
     viewmats = world_view_transform.unsqueeze(0)  # (1, 4, 4)
@@ -76,46 +73,37 @@ def render_view(
 
     # Call gsplat rasterizer
     # gsplat API: rasterization(means, quats, scales, opacities, colors, viewmats, Ks, width, height, ...)
-    try:
-        render_colors, render_alphas, info = rasterization(
-            means=means,
-            quats=quats,
-            scales=scales,
-            opacities=opacities,
-            colors=sh_coeffs,  # (N, 3, D)
-            viewmats=viewmats,
-            Ks=Ks,
-            width=width,
-            height=height,
-            sh_degree=sh_degree,
-            backgrounds=bg_color.unsqueeze(0),  # (1, 3)
-            render_mode="RGB",
-            packed=False,
-            absgrad=False,
-        )
+    render_colors, render_alphas, info = rasterization(
+        means=means,
+        quats=quats,
+        scales=scales,
+        opacities=opacities,
+        colors=render_colors,
+        viewmats=viewmats,
+        Ks=Ks,
+        width=width,
+        height=height,
+        sh_degree=render_sh_degree,
+        backgrounds=bg_color.unsqueeze(0),  # (1, 3)
+        render_mode="RGB",
+        packed=False,
+        absgrad=False,
+    )
 
-        render = render_colors.squeeze(0).permute(2, 0, 1)   # (3, H, W)
-        alpha = render_alphas.squeeze(0).squeeze(-1)          # (H, W)
+    render = render_colors.squeeze(0).permute(2, 0, 1)   # (3, H, W)
+    alpha = render_alphas.squeeze(0).squeeze(-1)          # (H, W)
 
-        # Depth approximation from median intersection
-        depth = info.get('median_depth', torch.zeros(height, width, device=device))
-        if depth.ndim == 3:
-            depth = depth.squeeze(0).squeeze(-1)
+    # Depth approximation from median intersection
+    depth = info.get('median_depth', torch.zeros(height, width, device=device))
+    if depth.ndim == 3:
+        depth = depth.squeeze(0).squeeze(-1)
 
-        return {
-            'render': render,
-            'alpha': alpha,
-            'depth': depth,
-            'info': info,
-        }
-    except Exception as e:
-        print(f"gsplat rasterization error: {e}")
-        return {
-            'render': bg_color[:, None, None].expand(3, height, width).clone(),
-            'alpha': torch.zeros(height, width, device=device),
-            'depth': torch.zeros(height, width, device=device),
-            'info': f'error: {e}',
-        }
+    return {
+        'render': render,
+        'alpha': alpha,
+        'depth': depth,
+        'info': info,
+    }
 
 
 def render_view_simple(

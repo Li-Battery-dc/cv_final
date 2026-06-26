@@ -5,12 +5,12 @@ Runs VGGT inference on scene images, predicts tracks via VGGSfM tracker,
 filters observations, and saves both .npz reconstruction and COLMAP sparse model.
 
 Usage:
-    python scripts/vggt_export.py \
+    python -m src.vggt_export \
         --scene_dir data/scene \
         --output_dir outputs/vggt_raw
 
     # With custom thresholds:
-    python scripts/vggt_export.py \
+    python -m src.vggt_export \
         --scene_dir data/scene \
         --output_dir outputs/vggt_raw \
         --max_query_pts 2048 \

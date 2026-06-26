@@ -36,9 +36,8 @@ class GaussianViewer:
         self.width = width
         self.height = height
         self.port = port
-        self.bg_color = torch.tensor(bg_color, device=self._device)
-
         self._device = model._xyz.device
+        self.bg_color = torch.tensor(bg_color, device=self._device)
         self._fps_buffer = []
 
     def run(self):
@@ -84,36 +83,39 @@ class GaussianViewer:
             look_at_t = torch.tensor(look_at, dtype=torch.float32, device=device)
             up_t = torch.tensor(up, dtype=torch.float32, device=device)
 
-            # Build world-to-camera matrix (OpenCV convention)
+            # Build world-to-camera matrix (OpenCV convention).
             forward = cam_pos_t - look_at_t
             forward = forward / torch.norm(forward)
 
-            right = torch.cross(up_t, forward)
+            right = torch.cross(up_t, forward, dim=0)
             right = right / torch.norm(right)
 
-            new_up = torch.cross(forward, right)
+            new_up = torch.cross(forward, right, dim=0)
             new_up = new_up / torch.norm(new_up)
 
-            # OpenCV: R is world-to-camera
             R = torch.stack([right, new_up, forward], dim=0)  # (3, 3)
             t = -R @ cam_pos_t
 
+            w2c = torch.eye(4, dtype=torch.float32, device=device)
+            w2c[:3, :3] = R
+            w2c[:3, 3] = t
+
+            # Render
+            resolution = max(0.1, float(resolution_slider.value))
+            w, h = int(self.width * resolution), int(self.height * resolution)
+
             # Build intrinsics (using FOV from Viser camera)
             fov = camera.fov  # vertical FOV in radians
-            fy = (self.height / 2.0) / torch.tan(torch.tensor(fov / 2.0, device=device))
+            fy = (h / 2.0) / torch.tan(torch.tensor(fov / 2.0, device=device))
             fx = fy
-            cx = self.width / 2.0
-            cy = self.height / 2.0
+            cx = w / 2.0
+            cy = h / 2.0
 
             K = torch.tensor([
                 [fx, 0, cx],
                 [0, fy, cy],
                 [0, 0, 1],
             ], dtype=torch.float32, device=device)
-
-            # Render
-            resolution = max(0.1, float(resolution_slider.value))
-            w, h = int(self.width * resolution), int(self.height * resolution)
 
             bg = torch.tensor([
                 float(bg_color_r.value),
@@ -123,8 +125,8 @@ class GaussianViewer:
 
             result = render_view(
                 model=self.model,
-                world_view_transform=torch.eye(4, device=device),  # will be built inside
-                full_proj_transform=torch.eye(4, device=device),
+                world_view_transform=w2c,
+                full_proj_transform=w2c,
                 camera_center=cam_pos_t,
                 K=K,
                 width=w,

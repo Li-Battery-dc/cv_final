@@ -291,7 +291,7 @@ class GaussianModel(nn.Module):
             self._split_points(split_mask)
 
         # Reset opacity for near-transparent Gaussians (encourage them to adapt)
-        reset_mask = opacities < min_opacity_reset
+        reset_mask = self.get_opacities() < min_opacity_reset
         if reset_mask.any():
             init_opacity = 0.01
             logit = np.log(init_opacity / (1.0 - init_opacity))
@@ -306,7 +306,9 @@ class GaussianModel(nn.Module):
         """Accumulate xyz gradients for densification decision."""
         if self._xyz.grad is not None:
             if self._grad_accum is None:
-                self._grad_accum = torch.zeros_like(self._xyz)
+                self._grad_accum = torch.zeros(
+                    self.num_gaussians, dtype=self._xyz.dtype, device=self._xyz.device
+                )
             self._grad_accum += self._xyz.grad.detach().norm(dim=-1)
             self._denom_accum += 1
 

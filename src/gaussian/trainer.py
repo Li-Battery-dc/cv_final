@@ -112,12 +112,12 @@ def compute_psnr(img: torch.Tensor, gt: torch.Tensor) -> float:
     return float(20.0 * math.log10(1.0) - 10.0 * math.log10(float(mse)))
 
 
-def compute_ssim(img: torch.Tensor, gt: torch.Tensor) -> float:
+def compute_ssim(img: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     """Compute SSIM between two (3, H, W) tensors."""
     try:
         from torchmetrics import StructuralSimilarityIndexMeasure
         ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(img.device)
-        return float(ssim(img.unsqueeze(0), gt.unsqueeze(0)))
+        return ssim(img.unsqueeze(0), gt.unsqueeze(0))
     except ImportError:
         # Simple fallback using torch
         C1 = (0.01 * 1.0) ** 2
@@ -135,7 +135,7 @@ def compute_ssim(img: torch.Tensor, gt: torch.Tensor) -> float:
         sigma12 = F.avg_pool2d(img_gray.unsqueeze(0) * gt_gray.unsqueeze(0), 11, 1, 5) - mu1_mu2
         ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
                    ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
-        return float(ssim_map.mean())
+        return ssim_map.mean()
 
 
 class GaussianTrainer:
@@ -345,7 +345,7 @@ class GaussianTrainer:
                 rendered = render_result['render']
                 gt = view['image']
                 psnrs.append(compute_psnr(rendered, gt))
-                ssims.append(compute_ssim(rendered, gt))
+                ssims.append(float(compute_ssim(rendered, gt)))
 
         model.train()
         return {
