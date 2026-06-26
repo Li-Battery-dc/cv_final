@@ -1,6 +1,7 @@
 /data
 .venv/
 /packages
+/record.md
 _pycache__/
 *.pyc
 *.pyo
