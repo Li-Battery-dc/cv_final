@@ -64,7 +64,11 @@ class Reconstruction:
         metadata = {}
         if 'metadata' in data:
             try:
-                metadata = data['metadata'].item()
+                metadata_raw = data['metadata'].item()
+                if isinstance(metadata_raw, (bytes, bytearray)):
+                    metadata = pickle.loads(metadata_raw)
+                elif isinstance(metadata_raw, dict):
+                    metadata = metadata_raw
             except (ValueError, AttributeError):
                 pass
 

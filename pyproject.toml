@@ -28,8 +28,8 @@ dependencies = [
     "omegaconf>=2.3",
 
     # COLMAP Python bindings
-    "pycolmap>=3.10",
-    "pyceres>=2.3",
+    "pycolmap==3.10.0",
+    "pyceres==2.3",
 
     # Image / geometry
     "kornia>=0.7",

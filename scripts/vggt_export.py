@@ -25,6 +25,7 @@ import sys
 import random
 import argparse
 import time
+import gc
 
 import numpy as np
 import torch
@@ -56,6 +57,10 @@ def parse_args():
                         help="Directory containing images/ subfolder")
     parser.add_argument("--output_dir", type=str, default="outputs/vggt_raw",
                         help="Output directory for reconstruction")
+    parser.add_argument("--stage", type=str, default="all", choices=("all", "vggt", "tracks"),
+                        help="Run full pipeline, VGGT-only cache export, or tracks/reconstruction from cache.")
+    parser.add_argument("--vggt_cache", type=str, default=None,
+                        help="Path to VGGT cache .npz. Defaults to output_dir/vggt_predictions.npz")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--img_load_resolution", type=int, default=1024,
                         help="Resolution for loading images (square)")
@@ -71,7 +76,7 @@ def parse_args():
                         help="Max reprojection error for BA inlier filtering")
     parser.add_argument("--min_visible_frames", type=int, default=3,
                         help="Min frames a point must be visible in")
-    parser.add_argument("--fine_tracking", action="store_true", default=True,
+    parser.add_argument("--fine_tracking", action=argparse.BooleanOptionalAction, default=True,
                         help="Use fine (slower) tracking")
     parser.add_argument("--camera_type", type=str, default="PINHOLE",
                         help="COLMAP camera type: PINHOLE or SIMPLE_PINHOLE")
@@ -138,6 +143,104 @@ def run_vggt_inference(model, images, dtype, device, vggt_resolution=518):
     return extrinsic, intrinsic, depth_map, depth_conf
 
 
+def compute_image_size_hw(original_coords_np: np.ndarray) -> np.ndarray:
+    """Convert VGGT original_coords to image sizes in [height, width] order."""
+    image_size_hw = np.zeros((len(original_coords_np), 2), dtype=np.int32)
+    for s in range(len(original_coords_np)):
+        # original_coords_np[s] = [x1, y1, x2, y2, width, height]
+        image_size_hw[s] = original_coords_np[s, -2:][::-1]
+    return image_size_hw
+
+
+def save_dense_point_cloud(images, points_3d_dense, depth_conf, args, output_dir):
+    """Save a confidence-filtered dense VGGT point cloud for quick visualization."""
+    import trimesh
+    from vggt.utils.helper import randomly_limit_trues
+
+    conf_mask = depth_conf >= args.conf_thres_value
+    conf_mask = randomly_limit_trues(conf_mask, args.max_dense_points)
+
+    pts_dense = points_3d_dense[conf_mask]
+    images_vggt = F.interpolate(images, size=(args.vggt_resolution, args.vggt_resolution),
+                                mode="bilinear", align_corners=False)
+    images_np = (images_vggt.cpu().numpy() * 255).astype(np.uint8)
+    images_np = images_np.transpose(0, 2, 3, 1)
+    pts_rgb_dense = images_np[conf_mask]
+
+    ply_path = os.path.join(output_dir, "points3d_dense.ply")
+    trimesh.PointCloud(pts_dense, colors=pts_rgb_dense).export(ply_path)
+    print(f"Saved dense point cloud ({len(pts_dense)} pts) to {ply_path}")
+    return ply_path, len(pts_dense)
+
+
+def save_vggt_cache(path, image_names, image_size_hw, original_coords_np,
+                    extrinsic, intrinsic, depth_map, depth_conf, points_3d_dense,
+                    args):
+    """Save VGGT-only outputs so VGGSfM tracking can be run later."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    np.savez_compressed(
+        path,
+        image_names=np.array(image_names, dtype=str),
+        image_size_hw=image_size_hw.astype(np.int32),
+        original_coords=original_coords_np,
+        extrinsic=extrinsic,
+        intrinsic=intrinsic,
+        depth_map=depth_map,
+        depth_conf=depth_conf,
+        points_3d_dense=points_3d_dense,
+        img_load_resolution=np.array(args.img_load_resolution, dtype=np.int32),
+        vggt_resolution=np.array(args.vggt_resolution, dtype=np.int32),
+    )
+    print(f"Saved VGGT cache to {path}")
+
+
+def load_vggt_cache(path):
+    """Load VGGT-only outputs saved by --stage vggt."""
+    data = np.load(path, allow_pickle=True)
+    return {
+        "image_names": data["image_names"].astype(str).tolist(),
+        "image_size_hw": data["image_size_hw"],
+        "original_coords": data["original_coords"],
+        "extrinsic": data["extrinsic"],
+        "intrinsic": data["intrinsic"],
+        "depth_map": data["depth_map"],
+        "depth_conf": data["depth_conf"],
+        "points_3d_dense": data["points_3d_dense"],
+        "img_load_resolution": int(data["img_load_resolution"]),
+        "vggt_resolution": int(data["vggt_resolution"]),
+    }
+
+
+def export_reconstruction_outputs(recon, original_coords_np, img_load_resolution,
+                                  output_dir, camera_type):
+    """Save Reconstruction .npz and COLMAP sparse model."""
+    npz_path = os.path.join(output_dir, "reconstruction.npz")
+    recon.to_npz(npz_path)
+    print(f"Saved reconstruction to {npz_path}")
+
+    recon_colmap = recon.copy()
+    for s in range(recon_colmap.num_images):
+        x1, y1, x2, y2, orig_w, orig_h = original_coords_np[s]
+        resize_ratio = max(orig_w, orig_h) / img_load_resolution
+
+        K = recon_colmap.intrinsics[s].copy()
+        K[0, 0] *= resize_ratio
+        K[1, 1] *= resize_ratio
+        K[0, 2] = orig_w / 2.0
+        K[1, 2] = orig_h / 2.0
+        recon_colmap.intrinsics[s] = K
+
+        cam_mask = recon_colmap.obs_camera_id == s
+        if np.any(cam_mask):
+            top_left = np.array([x1, y1])
+            recon_colmap.obs_xy[cam_mask] = (recon_colmap.obs_xy[cam_mask] - top_left) * resize_ratio
+
+    sparse_dir = os.path.join(output_dir, "sparse")
+    reconstruction_to_colmap_sparse(recon_colmap, sparse_dir, camera_type)
+    print(f"Saved COLMAP model to {sparse_dir}")
+    return npz_path, sparse_dir
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -151,6 +254,7 @@ def main():
     image_dir = os.path.join(scene_dir, "images")
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
+    vggt_cache = os.path.abspath(args.vggt_cache or os.path.join(output_dir, "vggt_predictions.npz"))
 
     # Load images
     import glob as _glob
@@ -167,33 +271,80 @@ def main():
     S = images.shape[0]
     print(f"Loaded images: shape={images.shape}")
 
-    # ---- Step 1: VGGT Inference ----
-    print("Running VGGT inference...")
-    t0 = time.time()
-    extrinsic, intrinsic, depth_map, depth_conf = run_vggt_inference(
-        model=load_vggt_model(device, dtype),
-        images=images, dtype=dtype, device=device,
-        vggt_resolution=args.vggt_resolution,
-    )
-    print(f"VGGT inference done in {time.time() - t0:.1f}s")
+    if args.stage in ("all", "vggt"):
+        # ---- Step 1: VGGT Inference ----
+        print("Running VGGT inference...")
+        t0 = time.time()
+        model = load_vggt_model(device, dtype)
+        extrinsic, intrinsic, depth_map, depth_conf = run_vggt_inference(
+            model=model,
+            images=images, dtype=dtype, device=device,
+            vggt_resolution=args.vggt_resolution,
+        )
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"VGGT inference done in {time.time() - t0:.1f}s")
 
-    # Unproject depth to 3D points (per-pixel dense)
-    points_3d_dense = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
-    # points_3d_dense: (S, H_vggt, W_vggt, 3)
+        points_3d_dense = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+        image_size_hw = compute_image_size_hw(original_coords_np)
+        save_vggt_cache(
+            vggt_cache, image_names, image_size_hw, original_coords_np,
+            extrinsic, intrinsic, depth_map, depth_conf, points_3d_dense, args,
+        )
+        ply_path, dense_count = save_dense_point_cloud(
+            images, points_3d_dense, depth_conf, args, output_dir,
+        )
+
+        if args.stage == "vggt":
+            print("\n" + "=" * 60)
+            print("VGGT Stage Summary")
+            print("=" * 60)
+            print(f"  Images:           {S}")
+            print(f"  Dense points:     {dense_count}")
+            print(f"  VGGT cache:       {vggt_cache}")
+            print(f"  Output PLY:       {ply_path}")
+            print("=" * 60)
+            return 0
+    else:
+        # ---- Load cached VGGT outputs ----
+        print(f"Loading VGGT cache from {vggt_cache}")
+        cache = load_vggt_cache(vggt_cache)
+        cached_names = cache["image_names"]
+        if cached_names != image_names:
+            raise ValueError("Image list differs from VGGT cache; use the same scene/images ordering.")
+        if cache["img_load_resolution"] != args.img_load_resolution:
+            raise ValueError(
+                f"VGGT cache was made with img_load_resolution={cache['img_load_resolution']}, "
+                f"but current args use {args.img_load_resolution}. Re-run with matching resolution."
+            )
+        if cache["vggt_resolution"] != args.vggt_resolution:
+            raise ValueError(
+                f"VGGT cache was made with vggt_resolution={cache['vggt_resolution']}, "
+                f"but current args use {args.vggt_resolution}. Re-run with matching resolution."
+            )
+        image_size_hw = cache["image_size_hw"]
+        original_coords_np = cache["original_coords"]
+        extrinsic = cache["extrinsic"]
+        intrinsic = cache["intrinsic"]
+        depth_conf = cache["depth_conf"]
+        points_3d_dense = cache["points_3d_dense"]
 
     # ---- Step 2: Track Prediction ----
     print("Running track prediction...")
     t0 = time.time()
-    with torch.cuda.amp.autocast(dtype=dtype):
-        pred_tracks, pred_vis, pred_confs, points_3d_track, points_rgb_track = predict_tracks(
-            images,
-            conf=depth_conf,
-            points_3d=points_3d_dense,
-            masks=None,
-            max_query_pts=args.max_query_pts,
-            query_frame_num=args.query_frame_num,
-            fine_tracking=args.fine_tracking,
-        )
+    with torch.no_grad():
+        with torch.cuda.amp.autocast(dtype=dtype):
+            pred_tracks, pred_vis, pred_confs, points_3d_track, points_rgb_track = predict_tracks(
+                images,
+                conf=depth_conf,
+                points_3d=points_3d_dense,
+                masks=None,
+                max_query_pts=args.max_query_pts,
+                query_frame_num=args.query_frame_num,
+                fine_tracking=args.fine_tracking,
+            )
         torch.cuda.empty_cache()
     print(f"Track prediction done in {time.time() - t0:.1f}s")
     print(f"Tracks: {pred_tracks.shape}, points: {points_3d_track.shape}")
@@ -202,12 +353,6 @@ def main():
     scale = args.img_load_resolution / args.vggt_resolution
     intrinsic_scaled = intrinsic.copy()
     intrinsic_scaled[:, :2, :] *= scale
-
-    # Compute original image sizes
-    image_size_hw = np.zeros((S, 2), dtype=np.int32)
-    for s in range(S):
-        # original_coords_np[s] = [x1, y1, x2, y2, width, height]
-        image_size_hw[s] = original_coords_np[s, -2:][::-1]  # (h, w) order
 
     # ---- Step 3: Build Reconstruction ----
     print("Building reconstruction with tracks...")
@@ -233,80 +378,22 @@ def main():
     recon.metadata['vggt_resolution'] = args.vggt_resolution
     recon.metadata['img_load_resolution'] = args.img_load_resolution
     recon.metadata['original_coords'] = original_coords_np
+    recon.metadata['vggt_cache'] = vggt_cache
 
-    # ---- Step 4: Save .npz ----
-    npz_path = os.path.join(output_dir, "reconstruction.npz")
-    recon.to_npz(npz_path)
-    print(f"Saved reconstruction to {npz_path}")
+    npz_path, sparse_dir = export_reconstruction_outputs(
+        recon, original_coords_np, args.img_load_resolution, output_dir, args.camera_type,
+    )
 
-    # ---- Step 5: Export COLMAP sparse model ----
-    # Rescale 2D observations from square coordinates to original image coords
-    recon_colmap = recon.copy()
-
-    # Transform observation coordinates from square coords to original coords
-    # Square coords: padded square at img_load_resolution
-    # Original coords: original image in [x1, y1, x2, y2] region
-    for s in range(S):
-        x1, y1, x2, y2, orig_w, orig_h = original_coords_np[s]
-        resize_ratio = max(orig_w, orig_h) / args.img_load_resolution
-
-        # Update camera intrinsics
-        K = recon_colmap.intrinsics[s].copy()
-        K[0, 0] *= resize_ratio
-        K[1, 1] *= resize_ratio
-        # Principal point at original image center
-        K[0, 2] = orig_w / 2.0
-        K[1, 2] = orig_h / 2.0
-        recon_colmap.intrinsics[s] = K
-
-        # Shift observations from square space to original space
-        cam_mask = recon_colmap.obs_camera_id == s
-        if np.any(cam_mask):
-            # Observations are in 1024x1024 square space
-            # Need to map: square_coord -> original image coord
-            # original = (square - top_left) * resize_ratio
-            top_left = np.array([x1, y1])
-            recon_colmap.obs_xy[cam_mask] = (recon_colmap.obs_xy[cam_mask] - top_left) * resize_ratio
-
-    # Update image sizes
-    recon_colmap.image_size_hw = image_size_hw
-
-    # Save COLMAP
-    sparse_dir = os.path.join(output_dir, "sparse")
-    reconstruction_to_colmap_sparse(recon_colmap, sparse_dir, args.camera_type)
-    print(f"Saved COLMAP model to {sparse_dir}")
-
-    # ---- Step 6: Save dense point cloud (.ply) for visualization ----
-    import trimesh
-    from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
-
-    # Build dense point cloud from depth (conf-filtered)
-    conf_mask = depth_conf >= args.conf_thres_value
-    conf_mask = randomly_limit_trues(conf_mask, args.max_dense_points)
-
-    pts_dense = points_3d_dense[conf_mask]
-    # Get colors from resized images
-    images_518 = F.interpolate(images, size=(args.vggt_resolution, args.vggt_resolution),
-                               mode="bilinear", align_corners=False)
-    images_np = (images_518.cpu().numpy() * 255).astype(np.uint8)
-    images_np = images_np.transpose(0, 2, 3, 1)  # (S, H, W, 3)
-    pts_rgb_dense = images_np[conf_mask]
-
-    ply_path = os.path.join(output_dir, "points3d_dense.ply")
-    trimesh.PointCloud(pts_dense, colors=pts_rgb_dense).export(ply_path)
-    print(f"Saved dense point cloud ({len(pts_dense)} pts) to {ply_path}")
-
-    # ---- Step 7: Summary ----
+    # ---- Step 4: Summary ----
     print("\n" + "=" * 60)
     print("VGGT Export Summary")
     print("=" * 60)
     print(f"  Images:           {S}")
     print(f"  Track points:     {recon.num_points}")
     print(f"  Observations:     {recon.num_observations}")
-    print(f"  Dense points:     {len(pts_dense)}")
+    print(f"  VGGT cache:       {vggt_cache}")
     print(f"  Output .npz:      {npz_path}")
     print(f"  Output COLMAP:    {sparse_dir}")
-    print(f"  Output PLY:       {ply_path}")
     print("=" * 60)
 
     return 0

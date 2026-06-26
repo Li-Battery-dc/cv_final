@@ -1,27 +1,14 @@
 #!/usr/bin/env bash
 set -e
-# Project root, usually the parent directory of vggt/
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/Lesson_Project/cv_final}"
-
-# VGGT repo path
 VGGT_DIR="${VGGT_DIR:-$PROJECT_ROOT/vggt}"
-
-# Python virtual environment path
 VENV_PATH="${VENV_PATH:-$PROJECT_ROOT/.venv}"
-
-# Scene directory.
-# It should contain:
-#   SCENE_DIR/images/*.jpg
 SCENE_DIR="${SCENE_DIR:-$PROJECT_ROOT/data/scene}"
 
-# Whether to run viser visualization first: 1 or 0
-RUN_VISER="${RUN_VISER:-0}"
-
-# Whether to export COLMAP sparse files: 1 or 0
-RUN_COLMAP="${RUN_COLMAP:-1}"
+RUN_VISER="${RUN_VISER:-1}"
+RUN_COLMAP="${RUN_COLMAP:-0}"
 
 # Whether to use VGGT built-in BA in demo_colmap.py: 1 or 0
-# For your homework, keep this 0 initially. Later you can set it to 1 as a reference baseline.
 USE_BUILTIN_BA="${USE_BUILTIN_BA:-0}"
 
 # Lightweight BA parameters for VGGT built-in BA.
