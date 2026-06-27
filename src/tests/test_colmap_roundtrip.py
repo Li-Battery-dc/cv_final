@@ -12,6 +12,7 @@ if _PROJECT_ROOT not in sys.path:
 from src.data.reconstruction import Reconstruction
 from src.data.colmap_io import (reconstruction_to_colmap_sparse,
                                  colmap_sparse_to_reconstruction,
+                                 reconstruction_to_colmap_space,
                                  reconstruction_to_pycolmap)
 from src.ba.utils import rodrigues_rotate
 
@@ -138,7 +139,51 @@ def test_colmap_roundtrip():
     )
 
 
+def test_simple_pinhole_roundtrip():
+    """SIMPLE_PINHOLE cameras should keep focal length and principal point."""
+    recon = create_dummy_reconstruction()
+    recon_obj = reconstruction_to_pycolmap(recon, camera_type="SIMPLE_PINHOLE")
+    loaded = Reconstruction.from_pycolmap(
+        recon_obj,
+        list(recon.image_names),
+        recon.image_size_hw,
+    )
+
+    np.testing.assert_allclose(
+        loaded.intrinsics[:, 0, 0],
+        loaded.intrinsics[:, 1, 1],
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        loaded.intrinsics[:, 0, 2],
+        recon.intrinsics[:, 0, 2],
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        loaded.intrinsics[:, 1, 2],
+        recon.intrinsics[:, 1, 2],
+        atol=1e-5,
+    )
+
+
+def test_colmap_space_conversion():
+    """Metadata-based conversion should move observations into original image space."""
+    recon = create_dummy_reconstruction()
+    recon.metadata["original_coords"] = np.tile(
+        np.array([10.0, 20.0, 522.0, 532.0, 768.0, 432.0], dtype=np.float64),
+        (recon.num_images, 1),
+    )
+    recon.metadata["img_load_resolution"] = 512
+
+    recon_colmap = reconstruction_to_colmap_space(recon)
+    assert recon_colmap.metadata["colmap_space"] is True
+    np.testing.assert_allclose(recon_colmap.intrinsics[:, 0, 2], 384.0)
+    np.testing.assert_allclose(recon_colmap.intrinsics[:, 1, 2], 216.0)
+
+
 if __name__ == "__main__":
     test_npz_roundtrip()
     test_colmap_roundtrip()
+    test_simple_pinhole_roundtrip()
+    test_colmap_space_conversion()
     print("All COLMAP roundtrip tests passed!")

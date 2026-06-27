@@ -30,6 +30,13 @@ if _PROJECT_ROOT not in sys.path:
 from src.data.reconstruction import Reconstruction
 from src.gaussian.model import GaussianModel
 from src.gaussian.trainer import GaussianTrainer, CameraDataset
+from src.utils.experiment import (
+    prepare_output_dir,
+    save_json,
+    save_run_metadata,
+    update_latest_symlink,
+    utc_timestamp,
+)
 
 
 def parse_args():
@@ -41,7 +48,11 @@ def parse_args():
     parser.add_argument("--image_dir", type=str, required=True,
                         help="Path to original images")
     parser.add_argument("--output", type=str, default="outputs/gs_custom",
-                        help="Output directory")
+                        help="Output root directory")
+    parser.add_argument("--output_run_dir", type=str, default=None,
+                        help="Optional explicit output run directory")
+    parser.add_argument("--use_timestamp", action=argparse.BooleanOptionalAction, default=True,
+                        help="If true, save to output/runs/<timestamp>_gaussian_train")
 
     # Training
     parser.add_argument("--n_iterations", type=int, default=10000,
@@ -54,8 +65,13 @@ def parse_args():
                         metavar=('W', 'H'), help="Training resolution (width height)")
 
     # Model initialization
+    parser.add_argument("--init_mode", type=str, default="reconstruction",
+                        choices=("reconstruction", "random"),
+                        help="Initialize from sparse reconstruction or random scene bbox samples")
     parser.add_argument("--max_init_gaussians", type=int, default=100000,
                         help="Max Gaussians at initialization")
+    parser.add_argument("--random_init_gaussians", type=int, default=10000,
+                        help="Number of Gaussians for random initialization baseline")
     parser.add_argument("--scale_factor", type=float, default=1.0,
                         help="Scale multiplier for initial covariance")
 
@@ -66,6 +82,12 @@ def parse_args():
                         help="Stop densification at iteration")
     parser.add_argument("--densify_interval", type=int, default=200,
                         help="Densification interval")
+    parser.add_argument("--densify_clone_scale_factor", type=float, default=1.5,
+                        help="Clone when scale <= factor * reference scale")
+    parser.add_argument("--densify_split_scale_factor", type=float, default=2.5,
+                        help="Split when scale >= factor * reference scale")
+    parser.add_argument("--densify_prune_scale_factor", type=float, default=8.0,
+                        help="Prune when scale >= factor * reference scale")
     parser.add_argument("--max_n_gaussians", type=int, default=300000,
                         help="Maximum total Gaussians")
 
@@ -125,18 +147,62 @@ def main():
     recon = Reconstruction.from_npz(args.reconstruction)
     print(f"Reconstruction: {recon}")
 
+    output_dir = prepare_output_dir(
+        output_root=args.output,
+        stage_name="gaussian_train",
+        explicit_output_dir=args.output_run_dir,
+        use_timestamp=args.use_timestamp,
+    )
+    config_path = save_run_metadata(
+        output_dir,
+        stage="gaussian_train",
+        params={
+            "n_iterations": args.n_iterations,
+            "resolution": args.resolution,
+            "init_mode": args.init_mode,
+            "max_init_gaussians": args.max_init_gaussians,
+            "random_init_gaussians": args.random_init_gaussians,
+            "max_n_gaussians": args.max_n_gaussians,
+            "scale_factor": args.scale_factor,
+            "l1_weight": args.l1_weight,
+            "ssim_weight": args.ssim_weight,
+            "densify_from": args.densify_from,
+            "densify_until": args.densify_until,
+            "densify_interval": args.densify_interval,
+            "sh_degree": args.sh_degree,
+            "val_every": args.val_every,
+            "seed": args.seed,
+            "device": device,
+        },
+        inputs={
+            "reconstruction": os.path.abspath(args.reconstruction),
+            "image_dir": os.path.abspath(args.image_dir),
+            "output_dir": output_dir,
+        },
+    )
+    print(f"Saved run config: {config_path}")
+
     if recon.num_points == 0:
         print("Error: No 3D points in reconstruction")
         return 1
 
     # Initialize Gaussian model
-    print(f"Initializing Gaussian model (max {args.max_init_gaussians} Gaussians)...")
-    model = GaussianModel.initialize_from_reconstruction(
-        reconstruction=recon,
-        max_n_gaussians=args.max_init_gaussians,
-        scale_factor_multiplier=args.scale_factor,
-        device=device,
-    )
+    if args.init_mode == "random":
+        print(f"Initializing random Gaussian baseline ({args.random_init_gaussians} Gaussians)...")
+        model = GaussianModel.initialize_random(
+            reconstruction=recon,
+            n_gaussians=args.random_init_gaussians,
+            scale_factor_multiplier=args.scale_factor,
+            device=device,
+        )
+    else:
+        print(f"Initializing Gaussian model (max {args.max_init_gaussians} Gaussians)...")
+        model = GaussianModel.initialize_from_reconstruction(
+            reconstruction=recon,
+            max_n_gaussians=args.max_init_gaussians,
+            scale_factor_multiplier=args.scale_factor,
+            device=device,
+        )
     print(f"Initialized {model.num_gaussians} Gaussians")
 
     # Set SH degree
@@ -164,8 +230,9 @@ def main():
     trainer = GaussianTrainer(
         model=model,
         dataset=dataset,
-        output_dir=args.output,
+        output_dir=output_dir,
         n_iterations=args.n_iterations,
+        start_iteration=start_iteration,
         l1_weight=args.l1_weight,
         ssim_weight=args.ssim_weight,
         lr_dict={
@@ -179,6 +246,9 @@ def main():
         densify_from_iter=args.densify_from,
         densify_until_iter=args.densify_until,
         densify_interval=args.densify_interval,
+        densify_clone_scale_factor=args.densify_clone_scale_factor,
+        densify_split_scale_factor=args.densify_split_scale_factor,
+        densify_prune_scale_factor=args.densify_prune_scale_factor,
         max_n_gaussians=args.max_n_gaussians,
         sh_degree_start=0,
         sh_degree_end=args.sh_degree,
@@ -197,22 +267,32 @@ def main():
     # Train
     try:
         metrics = trainer.train()
+        save_json(os.path.join(output_dir, "summary.json"), {
+            "stage": "gaussian_train",
+            "timestamp_utc": utc_timestamp(),
+            "final_metrics": metrics,
+            "init_mode": args.init_mode,
+            "reconstruction": os.path.abspath(args.reconstruction),
+            "image_dir": os.path.abspath(args.image_dir),
+            "output_dir": output_dir,
+        })
+        update_latest_symlink(args.output, output_dir)
         print("\nTraining complete!")
         print(f"  Final PSNR: {metrics.get('psnr', 0):.2f} dB")
         print(f"  Final SSIM: {metrics.get('ssim', 0):.4f}")
         print(f"  Final Gaussians: {metrics.get('final_n_gaussians', 0)}")
         print(f"  Training time: {metrics.get('training_time_seconds', 0):.1f}s")
-        print(f"  Output: {args.output}")
+        print(f"  Output: {output_dir}")
     except KeyboardInterrupt:
         print("\nTraining interrupted. Saving checkpoint...")
         model.save_checkpoint(
-            os.path.join(args.output, "checkpoints", "interrupted.pt"),
+            os.path.join(output_dir, "checkpoints", "interrupted.pt"),
             trainer.optimizer,
             0,
         )
         # Also export what we have
-        model.export_ply(os.path.join(args.output, "interrupted.ply"))
-        print(f"Saved interrupted checkpoint to {args.output}/checkpoints/interrupted.pt")
+        model.export_ply(os.path.join(output_dir, "interrupted.ply"))
+        print(f"Saved interrupted checkpoint to {output_dir}/checkpoints/interrupted.pt")
 
     return 0
 

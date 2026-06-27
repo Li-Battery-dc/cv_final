@@ -6,6 +6,38 @@ import numpy as np
 from src.data.reconstruction import Reconstruction
 
 
+def reconstruction_to_colmap_space(recon: Reconstruction) -> Reconstruction:
+    """Convert a Reconstruction to original-image COLMAP coordinates if metadata is available."""
+    if recon.metadata.get("colmap_space", False):
+        return recon.copy()
+
+    original_coords = recon.metadata.get("original_coords", None)
+    img_load_resolution = recon.metadata.get("img_load_resolution", None)
+    if original_coords is None or img_load_resolution is None:
+        return recon.copy()
+
+    original_coords = np.asarray(original_coords)
+    recon_colmap = recon.copy()
+    for s in range(recon_colmap.num_images):
+        x1, y1, x2, y2, orig_w, orig_h = original_coords[s]
+        resize_ratio = max(orig_w, orig_h) / float(img_load_resolution)
+
+        K = recon_colmap.intrinsics[s].copy()
+        K[0, 0] *= resize_ratio
+        K[1, 1] *= resize_ratio
+        K[0, 2] = orig_w / 2.0
+        K[1, 2] = orig_h / 2.0
+        recon_colmap.intrinsics[s] = K
+
+        cam_mask = recon_colmap.obs_camera_id == s
+        if np.any(cam_mask):
+            top_left = np.array([x1, y1], dtype=np.float64)
+            recon_colmap.obs_xy[cam_mask] = (recon_colmap.obs_xy[cam_mask] - top_left) * resize_ratio
+
+    recon_colmap.metadata["colmap_space"] = True
+    return recon_colmap
+
+
 def reconstruction_to_colmap_sparse(recon: Reconstruction, output_dir: str,
                                     camera_type: str = "PINHOLE"):
     """Write COLMAP-format cameras.bin, images.bin, points3D.bin to output_dir.
@@ -34,6 +66,7 @@ def reconstruction_to_pycolmap(recon: Reconstruction,
     """
     import pycolmap
 
+    recon = reconstruction_to_colmap_space(recon)
     reconstruction = pycolmap.Reconstruction()
     S, P = recon.num_images, recon.num_points
 

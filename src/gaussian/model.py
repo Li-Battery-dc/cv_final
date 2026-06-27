@@ -83,12 +83,17 @@ class GaussianModel(nn.Module):
 
         # Non-trainable state
         self.register_buffer('_max_sh_degree_tensor', torch.tensor(max_sh_degree))
+        self.register_buffer('_scale_reference_tensor', torch.tensor(1.0, dtype=torch.float32))
         self._grad_accum = None  # For densification
         self._denom_accum = 0
 
     @property
     def num_gaussians(self) -> int:
         return self._xyz.shape[0]
+
+    @property
+    def scale_reference(self) -> float:
+        return float(self._scale_reference_tensor.item())
 
     def get_xyz(self) -> torch.Tensor:
         return self._xyz
@@ -228,42 +233,107 @@ class GaussianModel(nn.Module):
         model._features_rest = nn.Parameter(
             torch.zeros(P, 3, 0, dtype=torch.float32, device=device)
         )
+        model._scale_reference_tensor = torch.tensor(
+            float(np.median(scales[:, 0])) if len(scales) > 0 else 1.0,
+            dtype=torch.float32,
+            device=device,
+        )
+
+        return model
+
+    @classmethod
+    def initialize_random(cls, reconstruction,
+                          n_gaussians: int = 10_000,
+                          scale_factor_multiplier: float = 1.0,
+                          device: str = "cuda") -> "GaussianModel":
+        """Initialize Gaussians randomly inside the scene bounding box."""
+        points3d = reconstruction.points3d
+        points_rgb = reconstruction.points_rgb
+
+        cam_centers = _compute_camera_centers(reconstruction.extrinsics)
+        if len(points3d) > 0:
+            support = np.concatenate([points3d, cam_centers], axis=0)
+        else:
+            support = cam_centers
+
+        bbox_min = support.min(axis=0)
+        bbox_max = support.max(axis=0)
+        extent = np.maximum(bbox_max - bbox_min, 1e-3)
+
+        xyz = np.random.uniform(bbox_min, bbox_max, size=(n_gaussians, 3))
+        if len(points_rgb) > 0:
+            sample_ids = np.random.choice(len(points_rgb), size=n_gaussians, replace=True)
+            rgb = points_rgb[sample_ids]
+        else:
+            rgb = np.full((n_gaussians, 3), 127, dtype=np.uint8)
+
+        base_scale = float(np.mean(extent) / max(np.cbrt(n_gaussians), 1.0))
+        scales = np.full((n_gaussians, 3), max(base_scale, 1e-4) * scale_factor_multiplier, dtype=np.float32)
+
+        model = cls(sh_degree=0, max_sh_degree=2)
+        model._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float32, device=device))
+        model._log_scales = nn.Parameter(torch.log(torch.tensor(scales, dtype=torch.float32, device=device) + 1e-8))
+        quats = torch.zeros(n_gaussians, 4, dtype=torch.float32, device=device)
+        quats[:, 3] = 1.0
+        model._quaternions = nn.Parameter(quats)
+        init_opacity = 0.1
+        logit_opacity = np.log(init_opacity / (1.0 - init_opacity))
+        model._log_opacities = nn.Parameter(
+            torch.full((n_gaussians,), logit_opacity, dtype=torch.float32, device=device)
+        )
+        model._features_dc = nn.Parameter(
+            (torch.tensor(rgb, dtype=torch.float32, device=device) / 255.0).unsqueeze(-1)
+        )
+        model._features_rest = nn.Parameter(
+            torch.zeros(n_gaussians, 3, 0, dtype=torch.float32, device=device)
+        )
+        model._scale_reference_tensor = torch.tensor(
+            float(scales[0, 0]) if len(scales) > 0 else 1.0,
+            dtype=torch.float32,
+            device=device,
+        )
 
         return model
 
     # ---- Densification ----
 
     def densify_and_prune(self, grad_threshold: float = 0.0002,
-                          clone_scale: float = 1.0, split_scale: float = 1.6,
+                          clone_scale_factor: float = 1.5,
+                          split_scale_factor: float = 2.5,
                           max_n_gaussians: int = 300_000,
                           prune_opacity_threshold: float = 0.005,
-                          prune_scale_threshold: float = 0.01,
+                          prune_scale_factor: float = 8.0,
                           max_screen_radius: float = 100.0,
                           min_opacity_reset: float = 0.01):
         """Perform densification (clone/split) and pruning.
 
         Args:
             grad_threshold: Position gradient threshold for densification.
-            clone_scale: Max scale for cloning (small Gaussians).
-            split_scale: Min scale for splitting (large Gaussians).
+            clone_scale_factor: Clone if scale <= factor * reference_scale.
+            split_scale_factor: Split if scale >= factor * reference_scale.
             max_n_gaussians: Maximum total Gaussians.
             prune_opacity_threshold: Remove Gaussians with opacity below this.
-            prune_scale_threshold: Remove Gaussians with scales too large.
+            prune_scale_factor: Remove Gaussians with scales too large relative to reference.
             max_screen_radius: Prune Gaussians too large on screen.
         """
         if self._grad_accum is None:
-            return
+            return {'skipped': True, 'reason': 'no_gradients'}
 
         grad_norm = self._grad_accum / max(self._denom_accum, 1)
         scales = self.get_scales()
         opacities = self.get_opacities()
+        scale_reference = max(self.scale_reference, 1e-6)
+        clone_scale = clone_scale_factor * scale_reference
+        split_scale = split_scale_factor * scale_reference
+        prune_scale_threshold = prune_scale_factor * scale_reference
+        n_before = int(self.num_gaussians)
 
         # Prune low-opacity Gaussians
         prune_mask = opacities < prune_opacity_threshold
 
         # Prune extremely large scales
         max_scale = scales.max(dim=-1)[0]
-        prune_mask |= max_scale > prune_scale_threshold * 50.0
+        prune_mask |= max_scale > prune_scale_threshold
 
         # Detect high-gradient Gaussians for densification
         high_grad = grad_norm > grad_threshold
@@ -272,6 +342,7 @@ class GaussianModel(nn.Module):
         max_scale_all = scales.max(dim=-1)[0]
         clone_mask = high_grad & (max_scale_all <= clone_scale)
         split_mask = high_grad & (max_scale_all >= split_scale)
+        n_pruned = int(prune_mask.sum().item())
 
         # Apply pruning
         if prune_mask.any():
@@ -281,17 +352,24 @@ class GaussianModel(nn.Module):
         grad_norm = grad_norm[~prune_mask] if prune_mask.sum() > 0 else grad_norm
         clone_mask = clone_mask[~prune_mask] if prune_mask.sum() > 0 else clone_mask
         split_mask = split_mask[~prune_mask] if prune_mask.sum() > 0 else split_mask
+        clone_mask = _cap_boolean_mask(clone_mask, max(max_n_gaussians - self.num_gaussians, 0))
 
         # Clone
+        n_cloned = int(clone_mask.sum().item())
         if clone_mask.any() and self.num_gaussians < max_n_gaussians:
             self._clone_points(clone_mask)
 
         # Split
+        split_mask = _cap_boolean_mask(split_mask, max(max_n_gaussians - self.num_gaussians, 0))
+        n_split = int(split_mask.sum().item())
         if split_mask.any() and self.num_gaussians < max_n_gaussians:
             self._split_points(split_mask)
+        else:
+            n_split = 0 if not split_mask.any() else n_split
 
         # Reset opacity for near-transparent Gaussians (encourage them to adapt)
         reset_mask = self.get_opacities() < min_opacity_reset
+        n_reset = int(reset_mask.sum().item())
         if reset_mask.any():
             init_opacity = 0.01
             logit = np.log(init_opacity / (1.0 - init_opacity))
@@ -301,6 +379,19 @@ class GaussianModel(nn.Module):
         # Reset accumulators
         self._grad_accum = None
         self._denom_accum = 0
+        return {
+            'skipped': False,
+            'n_before': n_before,
+            'n_after': int(self.num_gaussians),
+            'n_pruned': n_pruned,
+            'n_cloned': n_cloned,
+            'n_split': n_split,
+            'n_reset_opacity': n_reset,
+            'scale_reference': float(scale_reference),
+            'clone_scale_threshold': float(clone_scale),
+            'split_scale_threshold': float(split_scale),
+            'prune_scale_threshold': float(prune_scale_threshold),
+        }
 
     def accumulate_gradients(self):
         """Accumulate xyz gradients for densification decision."""
@@ -315,15 +406,13 @@ class GaussianModel(nn.Module):
     def _prune_points(self, mask: torch.Tensor):
         """Remove Gaussians where mask is True."""
         valid = ~mask
-        indices = valid.nonzero(as_tuple=True)[0]
 
         self._xyz = nn.Parameter(self._xyz.data[valid])
         self._log_scales = nn.Parameter(self._log_scales.data[valid])
         self._quaternions = nn.Parameter(self._quaternions.data[valid])
         self._log_opacities = nn.Parameter(self._log_opacities.data[valid])
         self._features_dc = nn.Parameter(self._features_dc.data[valid])
-        if self._features_rest.numel() > 0:
-            self._features_rest = nn.Parameter(self._features_rest.data[valid])
+        self._features_rest = nn.Parameter(self._features_rest.data[valid])
 
     def _clone_points(self, mask: torch.Tensor):
         """Duplicate Gaussians with small scale."""
@@ -340,9 +429,8 @@ class GaussianModel(nn.Module):
         self._quaternions = nn.Parameter(torch.cat([self._quaternions.data, new_quats]))
         self._log_opacities = nn.Parameter(torch.cat([self._log_opacities.data, new_opacities]))
         self._features_dc = nn.Parameter(torch.cat([self._features_dc.data, new_dc]))
-        if self._features_rest.numel() > 0:
-            new_rest = self._features_rest.data[clone_indices]
-            self._features_rest = nn.Parameter(torch.cat([self._features_rest.data, new_rest]))
+        new_rest = self._features_rest.data[clone_indices]
+        self._features_rest = nn.Parameter(torch.cat([self._features_rest.data, new_rest]))
 
     def _split_points(self, mask: torch.Tensor):
         """Split large Gaussians into two smaller ones."""
@@ -376,9 +464,8 @@ class GaussianModel(nn.Module):
         self._quaternions = nn.Parameter(torch.cat([self._quaternions.data, new_quats]))
         self._log_opacities = nn.Parameter(torch.cat([self._log_opacities.data, new_opacities]))
         self._features_dc = nn.Parameter(torch.cat([self._features_dc.data, new_dc]))
-        if self._features_rest.numel() > 0:
-            new_rest = self._features_rest.data[split_indices]
-            self._features_rest = nn.Parameter(torch.cat([self._features_rest.data, new_rest]))
+        new_rest = self._features_rest.data[split_indices]
+        self._features_rest = nn.Parameter(torch.cat([self._features_rest.data, new_rest]))
 
     # ---- State management ----
 
@@ -395,6 +482,7 @@ class GaussianModel(nn.Module):
             '_features_dc': self._features_dc.data,
             '_features_rest': self._features_rest.data,
             '_max_sh_degree': self._max_sh_degree,
+            '_scale_reference': self._scale_reference_tensor,
         }
         if optimizer is not None:
             state['optimizer_state_dict'] = optimizer.state_dict()
@@ -411,6 +499,10 @@ class GaussianModel(nn.Module):
         self._features_dc = nn.Parameter(state['_features_dc'])
         self._features_rest = nn.Parameter(state['_features_rest'])
         self._max_sh_degree = state.get('_max_sh_degree', 2)
+        self._scale_reference_tensor = state.get(
+            '_scale_reference',
+            torch.tensor(1.0, dtype=torch.float32, device=self._xyz.device),
+        )
         if optimizer is not None and 'optimizer_state_dict' in state:
             optimizer.load_state_dict(state['optimizer_state_dict'])
         return state.get('iteration', 0)
@@ -485,3 +577,22 @@ def _compute_neighbor_scales(points: np.ndarray, k: int = 3) -> np.ndarray:
     # Initialize as isotropic scale
     scales = np.stack([avg_dist, avg_dist, avg_dist], axis=1)
     return scales
+
+
+def _compute_camera_centers(extrinsics: np.ndarray) -> np.ndarray:
+    """Compute camera centers from OpenCV camera-from-world extrinsics."""
+    rotations = extrinsics[:, :3, :3]
+    translations = extrinsics[:, :3, 3]
+    return -(np.transpose(rotations, (0, 2, 1)) @ translations[..., None]).squeeze(-1)
+
+
+def _cap_boolean_mask(mask: torch.Tensor, max_true: int) -> torch.Tensor:
+    """Keep at most max_true True entries, preserving index order."""
+    if max_true <= 0:
+        return torch.zeros_like(mask, dtype=torch.bool)
+    true_indices = mask.nonzero(as_tuple=True)[0]
+    if len(true_indices) <= max_true:
+        return mask
+    limited = torch.zeros_like(mask, dtype=torch.bool)
+    limited[true_indices[:max_true]] = True
+    return limited

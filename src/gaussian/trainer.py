@@ -106,7 +106,7 @@ class CameraDataset(torch.utils.data.Dataset):
 
 def compute_psnr(img: torch.Tensor, gt: torch.Tensor) -> float:
     """Compute PSNR between two (3, H, W) tensors in [0, 1]."""
-    mse = F.mse_loss(img, gt)
+    mse = F.mse_loss(img.detach(), gt.detach())
     if mse < 1e-10:
         return 100.0
     return float(20.0 * math.log10(1.0) - 10.0 * math.log10(float(mse)))
@@ -148,6 +148,7 @@ class GaussianTrainer:
         output_dir: str = "outputs/gs_custom",
         # Training
         n_iterations: int = 10000,
+        start_iteration: int = 0,
         l1_weight: float = 0.8,
         ssim_weight: float = 0.2,
         lr_dict: dict = None,
@@ -156,6 +157,9 @@ class GaussianTrainer:
         densify_until_iter: int = 6000,
         densify_interval: int = 200,
         densify_grad_threshold: float = 0.0002,
+        densify_clone_scale_factor: float = 1.5,
+        densify_split_scale_factor: float = 2.5,
+        densify_prune_scale_factor: float = 8.0,
         max_n_gaussians: int = 300_000,
         # SH scheduling
         sh_degree_start: int = 0,
@@ -173,12 +177,16 @@ class GaussianTrainer:
         self.dataset = dataset
         self.output_dir = output_dir
         self.n_iterations = n_iterations
+        self.start_iteration = start_iteration
         self.l1_weight = l1_weight
         self.ssim_weight = ssim_weight
         self.densify_from_iter = densify_from_iter
         self.densify_until_iter = densify_until_iter
         self.densify_interval = densify_interval
         self.densify_grad_threshold = densify_grad_threshold
+        self.densify_clone_scale_factor = densify_clone_scale_factor
+        self.densify_split_scale_factor = densify_split_scale_factor
+        self.densify_prune_scale_factor = densify_prune_scale_factor
         self.max_n_gaussians = max_n_gaussians
         self.sh_degree_start = sh_degree_start
         self.sh_degree_end = sh_degree_end
@@ -198,6 +206,7 @@ class GaussianTrainer:
         self.train_ids, self.val_ids = dataset.get_train_val_split(val_every)
 
         # Optimizer
+        self.lr_dict = lr_dict
         self.optimizer = model.create_optimizer(lr_dict)
 
         # Metrics history
@@ -215,13 +224,13 @@ class GaussianTrainer:
 
         bg_color = torch.tensor([0.0, 0.0, 0.0], device=device)
 
-        print(f"Starting training: {self.n_iterations} iterations")
+        print(f"Starting training: iter {self.start_iteration + 1} -> {self.n_iterations}")
         print(f"  Training views: {len(self.train_ids)}")
         print(f"  Validation views: {len(self.val_ids)}")
         print(f"  Initial Gaussians: {model.num_gaussians}")
 
         t_start = time.time()
-        for iteration in range(1, self.n_iterations + 1):
+        for iteration in range(self.start_iteration + 1, self.n_iterations + 1):
             # ---- Sample training view ----
             cam_idx = self.train_ids[np.random.randint(0, len(self.train_ids))]
             view = dataset[cam_idx]
@@ -260,12 +269,21 @@ class GaussianTrainer:
             # ---- Densification ----
             if (self.densify_from_iter <= iteration <= self.densify_until_iter
                     and iteration % self.densify_interval == 0):
-                model.densify_and_prune(
+                densify_stats = model.densify_and_prune(
                     grad_threshold=self.densify_grad_threshold,
+                    clone_scale_factor=self.densify_clone_scale_factor,
+                    split_scale_factor=self.densify_split_scale_factor,
+                    prune_scale_factor=self.densify_prune_scale_factor,
                     max_n_gaussians=self.max_n_gaussians,
                 )
                 # Recreate optimizer for new parameter sizes
-                self.optimizer = model.create_optimizer()
+                self.optimizer = model.create_optimizer(self.lr_dict)
+                if not densify_stats.get('skipped', False):
+                    print(
+                        f"  DENSIFY: N {densify_stats['n_before']} -> {densify_stats['n_after']} "
+                        f"(clone={densify_stats['n_cloned']}, split={densify_stats['n_split']}, "
+                        f"prune={densify_stats['n_pruned']}, ref={densify_stats['scale_reference']:.5f})"
+                    )
 
             # ---- SH degree scheduling ----
             if iteration % self.sh_degree_interval == 0 and model.active_sh_degree < self.sh_degree_end:
@@ -276,7 +294,7 @@ class GaussianTrainer:
             # ---- Logging ----
             if iteration % self.log_interval == 0:
                 psnr = compute_psnr(rendered, gt)
-                self.history['train_loss'].append(float(total_loss))
+                self.history['train_loss'].append(float(total_loss.detach()))
                 self.history['train_psnr'].append(psnr)
                 self.history['n_gaussians'].append(model.num_gaussians)
                 self.history['iteration'].append(iteration)
@@ -330,7 +348,8 @@ class GaussianTrainer:
         ssims = []
 
         with torch.no_grad():
-            for val_idx in self.val_ids[:4]:  # Limit to 4 for speed
+            # Evaluate the full validation split so A/B comparisons are less noisy.
+            for val_idx in self.val_ids:
                 view = self.dataset[val_idx]
                 render_result = render_view(
                     model=model,

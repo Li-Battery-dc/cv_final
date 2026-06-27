@@ -109,6 +109,8 @@ class Reconstruction:
         for cid, cam in reconstruction.cameras.items():
             idx = cam_map[cid]
             model = str(cam.model)
+            if "." in model:
+                model = model.split(".")[-1]
             if model in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL"):
                 f, cx, cy = cam.params[0], cam.params[1], cam.params[2]
                 intrinsics[idx] = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]], dtype=np.float64)

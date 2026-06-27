@@ -140,7 +140,7 @@ def compute_camera_delta(R1: np.ndarray, t1: np.ndarray,
         t1, t2: (3,) translation vectors.
 
     Returns:
-        (rot_deg, trans_dist): rotation angle in degrees and translation L2 distance.
+        (rot_deg, trans_dist): rotation angle in degrees and camera-center L2 distance.
     """
     # Relative rotation: R_rel = R2 @ R1^T
     R_rel = R2 @ R1.T
@@ -149,5 +149,7 @@ def compute_camera_delta(R1: np.ndarray, t1: np.ndarray,
     cos_theta = (trace - 1.0) / 2.0
     cos_theta = np.clip(cos_theta, -1.0, 1.0)
     rot_deg = np.arccos(cos_theta) * 180.0 / np.pi
-    trans_dist = float(np.linalg.norm(t2 - t1))
+    c1 = -R1.T @ t1
+    c2 = -R2.T @ t2
+    trans_dist = float(np.linalg.norm(c2 - c1))
     return float(rot_deg), trans_dist

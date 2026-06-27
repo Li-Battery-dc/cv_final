@@ -48,7 +48,14 @@ from vggt.dependency.track_predict import predict_tracks
 from vggt.dependency.projection import project_3D_points_np
 
 from src.data.reconstruction import Reconstruction
-from src.data.colmap_io import reconstruction_to_colmap_sparse
+from src.data.colmap_io import reconstruction_to_colmap_space, reconstruction_to_colmap_sparse
+from src.utils.experiment import (
+    prepare_output_dir,
+    save_json,
+    save_run_metadata,
+    update_latest_symlink,
+    utc_timestamp,
+)
 
 
 def parse_args():
@@ -56,7 +63,11 @@ def parse_args():
     parser.add_argument("--scene_dir", type=str, default="data/scene",
                         help="Directory containing images/ subfolder")
     parser.add_argument("--output_dir", type=str, default="outputs/vggt_raw",
-                        help="Output directory for reconstruction")
+                        help="Output root directory for reconstruction")
+    parser.add_argument("--output_run_dir", type=str, default=None,
+                        help="Optional explicit output run directory")
+    parser.add_argument("--use_timestamp", action=argparse.BooleanOptionalAction, default=True,
+                        help="If true, save to output_dir/runs/<timestamp>_vggt_export")
     parser.add_argument("--stage", type=str, default="all", choices=("all", "vggt", "tracks"),
                         help="Run full pipeline, VGGT-only cache export, or tracks/reconstruction from cache.")
     parser.add_argument("--vggt_cache", type=str, default=None,
@@ -218,23 +229,7 @@ def export_reconstruction_outputs(recon, original_coords_np, img_load_resolution
     recon.to_npz(npz_path)
     print(f"Saved reconstruction to {npz_path}")
 
-    recon_colmap = recon.copy()
-    for s in range(recon_colmap.num_images):
-        x1, y1, x2, y2, orig_w, orig_h = original_coords_np[s]
-        resize_ratio = max(orig_w, orig_h) / img_load_resolution
-
-        K = recon_colmap.intrinsics[s].copy()
-        K[0, 0] *= resize_ratio
-        K[1, 1] *= resize_ratio
-        K[0, 2] = orig_w / 2.0
-        K[1, 2] = orig_h / 2.0
-        recon_colmap.intrinsics[s] = K
-
-        cam_mask = recon_colmap.obs_camera_id == s
-        if np.any(cam_mask):
-            top_left = np.array([x1, y1])
-            recon_colmap.obs_xy[cam_mask] = (recon_colmap.obs_xy[cam_mask] - top_left) * resize_ratio
-
+    recon_colmap = reconstruction_to_colmap_space(recon)
     sparse_dir = os.path.join(output_dir, "sparse")
     reconstruction_to_colmap_sparse(recon_colmap, sparse_dir, camera_type)
     print(f"Saved COLMAP model to {sparse_dir}")
@@ -244,6 +239,11 @@ def export_reconstruction_outputs(recon, original_coords_np, img_load_resolution
 def main():
     args = parse_args()
     set_seed(args.seed)
+    stage_times = {}
+    dense_count = None
+    ply_path = None
+    npz_path = None
+    sparse_dir = None
 
     # Setup
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -252,8 +252,12 @@ def main():
 
     scene_dir = os.path.abspath(args.scene_dir)
     image_dir = os.path.join(scene_dir, "images")
-    output_dir = os.path.abspath(args.output_dir)
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = prepare_output_dir(
+        output_root=args.output_dir,
+        stage_name="vggt_export",
+        explicit_output_dir=args.output_run_dir,
+        use_timestamp=args.use_timestamp,
+    )
     vggt_cache = os.path.abspath(args.vggt_cache or os.path.join(output_dir, "vggt_predictions.npz"))
 
     # Load images
@@ -263,6 +267,29 @@ def main():
         raise ValueError(f"No images found in {image_dir}")
     image_names = [os.path.basename(p) for p in image_paths]
     print(f"Found {len(image_paths)} images in {image_dir}")
+    config_path = save_run_metadata(
+        output_dir,
+        stage="vggt_export",
+        params={
+            "stage": args.stage,
+            "img_load_resolution": args.img_load_resolution,
+            "vggt_resolution": args.vggt_resolution,
+            "max_query_pts": args.max_query_pts,
+            "query_frame_num": args.query_frame_num,
+            "vis_thresh": args.vis_thresh,
+            "max_reproj_error": args.max_reproj_error,
+            "min_visible_frames": args.min_visible_frames,
+            "fine_tracking": args.fine_tracking,
+            "camera_type": args.camera_type,
+        },
+        inputs={
+            "scene_dir": scene_dir,
+            "image_dir": image_dir,
+            "image_count": len(image_paths),
+            "output_dir": output_dir,
+        },
+    )
+    print(f"Saved run config: {config_path}")
 
     # Load and preprocess (square padding + resize)
     images, original_coords = load_and_preprocess_images_square(image_paths, args.img_load_resolution)
@@ -285,7 +312,8 @@ def main():
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        print(f"VGGT inference done in {time.time() - t0:.1f}s")
+        stage_times['vggt_inference_seconds'] = time.time() - t0
+        print(f"VGGT inference done in {stage_times['vggt_inference_seconds']:.1f}s")
 
         points_3d_dense = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
         image_size_hw = compute_image_size_hw(original_coords_np)
@@ -306,6 +334,16 @@ def main():
             print(f"  VGGT cache:       {vggt_cache}")
             print(f"  Output PLY:       {ply_path}")
             print("=" * 60)
+            save_json(os.path.join(output_dir, "summary.json"), {
+                "stage": args.stage,
+                "timestamp_utc": utc_timestamp(),
+                "images": S,
+                "dense_points": dense_count,
+                "vggt_cache": vggt_cache,
+                "output_ply": ply_path,
+                **stage_times,
+            })
+            update_latest_symlink(args.output_dir, output_dir)
             return 0
     else:
         # ---- Load cached VGGT outputs ----
@@ -346,7 +384,8 @@ def main():
                 fine_tracking=args.fine_tracking,
             )
         torch.cuda.empty_cache()
-    print(f"Track prediction done in {time.time() - t0:.1f}s")
+    stage_times['track_prediction_seconds'] = time.time() - t0
+    print(f"Track prediction done in {stage_times['track_prediction_seconds']:.1f}s")
     print(f"Tracks: {pred_tracks.shape}, points: {points_3d_track.shape}")
 
     # Scale intrinsics from VGGT resolution to image load resolution
@@ -379,6 +418,9 @@ def main():
     recon.metadata['img_load_resolution'] = args.img_load_resolution
     recon.metadata['original_coords'] = original_coords_np
     recon.metadata['vggt_cache'] = vggt_cache
+    recon.metadata['run_stage'] = 'vggt_export'
+    recon.metadata['run_timestamp_utc'] = utc_timestamp()
+    recon.metadata['run_config_path'] = config_path
 
     npz_path, sparse_dir = export_reconstruction_outputs(
         recon, original_coords_np, args.img_load_resolution, output_dir, args.camera_type,
@@ -395,6 +437,18 @@ def main():
     print(f"  Output .npz:      {npz_path}")
     print(f"  Output COLMAP:    {sparse_dir}")
     print("=" * 60)
+    save_json(os.path.join(output_dir, "summary.json"), {
+        "stage": args.stage,
+        "timestamp_utc": utc_timestamp(),
+        "images": S,
+        "track_points": recon.num_points,
+        "observations": recon.num_observations,
+        "vggt_cache": vggt_cache,
+        "output_npz": npz_path,
+        "output_colmap": sparse_dir,
+        **stage_times,
+    })
+    update_latest_symlink(args.output_dir, output_dir)
 
     return 0
 

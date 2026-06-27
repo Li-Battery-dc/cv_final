@@ -30,6 +30,13 @@ from src.data.reconstruction import Reconstruction
 from src.data.colmap_io import reconstruction_to_colmap_sparse
 from src.ba.optimize import run_ba
 from src.ba.problem import BAProblem
+from src.utils.experiment import (
+    prepare_output_dir,
+    save_json,
+    save_run_metadata,
+    update_latest_symlink,
+    utc_timestamp,
+)
 
 
 def parse_args():
@@ -37,7 +44,11 @@ def parse_args():
     parser.add_argument("--input", type=str, required=True,
                         help="Path to input reconstruction.npz")
     parser.add_argument("--output", type=str, required=True,
-                        help="Output directory for BA results")
+                        help="Output root directory for BA results")
+    parser.add_argument("--output_run_dir", type=str, default=None,
+                        help="Optional explicit output run directory")
+    parser.add_argument("--use_timestamp", action=argparse.BooleanOptionalAction, default=True,
+                        help="If true, save to output/runs/<timestamp>_ba_custom")
     parser.add_argument("--huber_delta", type=float, default=1.0,
                         help="Huber loss delta (pixels)")
     parser.add_argument("--max_nfev", type=int, default=100,
@@ -59,11 +70,33 @@ def parse_args():
 
 def main():
     args = parse_args()
+    output_dir = prepare_output_dir(
+        output_root=args.output,
+        stage_name="ba_custom",
+        explicit_output_dir=args.output_run_dir,
+        use_timestamp=args.use_timestamp,
+    )
 
     # Load input
     print(f"Loading reconstruction from: {args.input}")
     recon = Reconstruction.from_npz(args.input)
     print(f"Input: {recon}")
+    config_path = save_run_metadata(
+        output_dir,
+        stage="ba_custom",
+        params={
+            "huber_delta": args.huber_delta,
+            "max_nfev": args.max_nfev,
+            "outlier_threshold": args.outlier_threshold,
+            "n_fixed_cameras": args.n_fixed_cameras,
+            "camera_type": args.camera_type,
+            "no_outlier_removal": args.no_outlier_removal,
+            "no_colmap_export": args.no_colmap_export,
+            "verbose": args.verbose,
+        },
+        inputs={"input_reconstruction": os.path.abspath(args.input)},
+    )
+    print(f"Saved run config: {config_path}")
 
     # Check minimum requirements
     if recon.num_images < 3:
@@ -91,23 +124,25 @@ def main():
         recon_opt = recon
         stats['time_seconds'] = time.time() - t_start
 
-    # Create output directory
-    os.makedirs(args.output, exist_ok=True)
+    recon_opt.metadata['run_stage'] = 'ba_custom'
+    recon_opt.metadata['run_timestamp_utc'] = utc_timestamp()
+    recon_opt.metadata['run_config_path'] = config_path
+    recon_opt.metadata['ba_stats'] = dict(stats)
 
     # Save optimized reconstruction
-    npz_path = os.path.join(args.output, "reconstruction.npz")
+    npz_path = os.path.join(output_dir, "reconstruction.npz")
     recon_opt.to_npz(npz_path)
     print(f"Saved optimized reconstruction: {npz_path}")
 
     # Save statistics
-    stats_path = os.path.join(args.output, "ba_stats.json")
+    stats_path = os.path.join(output_dir, "ba_stats.json")
     with open(stats_path, 'w') as f:
         json.dump(stats, f, indent=2, default=float)
     print(f"Saved BA statistics: {stats_path}")
 
     # Export COLMAP
     if not args.no_colmap_export:
-        sparse_dir = os.path.join(args.output, "sparse")
+        sparse_dir = os.path.join(output_dir, "sparse")
         reconstruction_to_colmap_sparse(recon_opt, sparse_dir, args.camera_type)
         print(f"Saved COLMAP model: {sparse_dir}")
 
@@ -127,6 +162,16 @@ def main():
     print(f"  Time:  {stats.get('time_seconds', 0):.1f}s")
     print(f"  Success: {stats.get('convergence_success', False)}")
     print("=" * 60)
+    save_json(os.path.join(output_dir, "summary.json"), {
+        "stage": "ba_custom",
+        "timestamp_utc": utc_timestamp(),
+        "input_reconstruction": os.path.abspath(args.input),
+        "output_reconstruction": npz_path,
+        "camera_type": args.camera_type,
+        "stats": stats,
+        "output_dir": output_dir,
+    })
+    update_latest_symlink(args.output, output_dir)
 
     return 0 if not stats.get('failed', False) else 1
 

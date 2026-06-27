@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-PROJECT_ROOT="${PROJECT_ROOT:-$HOME/Lesson_Project/cv_final}"
+PROJECT_ROOT="${PROJECT_ROOT:-$HOME/cv_final}"
 VGGT_DIR="${VGGT_DIR:-$PROJECT_ROOT/vggt}"
 VENV_PATH="${VENV_PATH:-$PROJECT_ROOT/.venv}"
 SCENE_DIR="${SCENE_DIR:-$PROJECT_ROOT/data/scene}"

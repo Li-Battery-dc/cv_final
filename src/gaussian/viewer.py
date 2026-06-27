@@ -24,18 +24,21 @@ class GaussianViewer:
     """Interactive viewer for Gaussian Splatting models using Viser."""
 
     def __init__(self, model: GaussianModel, width: int = 768, height: int = 432,
-                 port: int = 8080, bg_color=(0.0, 0.0, 0.0)):
+                 port: int = 8080, host: str = "127.0.0.1",
+                 bg_color=(0.0, 0.0, 0.0)):
         """
         Args:
             model: Trained GaussianModel.
             width, height: Render resolution.
             port: Viser server port.
+            host: Viser server host.
             bg_color: Background color (R, G, B) in [0, 1].
         """
         self.model = model
         self.width = width
         self.height = height
         self.port = port
+        self.host = host
         self._device = model._xyz.device
         self.bg_color = torch.tensor(bg_color, device=self._device)
         self._fps_buffer = []
@@ -44,10 +47,10 @@ class GaussianViewer:
         """Start Viser server and register render callbacks."""
         import viser
 
-        server = viser.ViserServer(port=self.port)
+        server = viser.ViserServer(host=self.host, port=self.port)
         device = self._device
 
-        print(f"Viewer running at http://localhost:{self.port}")
+        print(f"Viewer running at http://{self.host}:{self.port}")
         print(f"Gaussians: {self.model.num_gaussians}")
 
         # Add GUI controls
@@ -64,6 +67,7 @@ class GaussianViewer:
         # FPS tracking
         last_time = [time.time()]
         frame_count = [0]
+        image_handle = [None]
 
         @server.on_client_connect
         def _(client: viser.ClientHandle):
@@ -156,11 +160,17 @@ class GaussianViewer:
         def _(camera: viser.CameraHandle):
             try:
                 img = render_for_camera(camera)
-                server.scene.add_image(
-                    img,
-                    render_width=self.width,
-                    render_height=self.height,
-                )
+                if image_handle[0] is None:
+                    image_handle[0] = server.scene.add_image(
+                        "/gaussian_render",
+                        img,
+                        render_width=self.width,
+                        render_height=self.height,
+                    )
+                else:
+                    image_handle[0].image = img
+                    image_handle[0].render_width = self.width
+                    image_handle[0].render_height = self.height
             except Exception as e:
                 print(f"Render error: {e}")
 
@@ -174,6 +184,7 @@ class GaussianViewer:
 
 def make_viewer_from_checkpoint(checkpoint_path: str, width: int = 768,
                                 height: int = 432, port: int = 8080,
+                                host: str = "127.0.0.1",
                                 device: str = "cuda") -> GaussianViewer:
     """Create a viewer from a checkpoint file."""
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -189,7 +200,7 @@ def make_viewer_from_checkpoint(checkpoint_path: str, width: int = 768,
     model._features_rest = torch.nn.Parameter(state['_features_rest'].to(device))
     model.active_sh_degree = sh_degree
 
-    return GaussianViewer(model, width=width, height=height, port=port)
+    return GaussianViewer(model, width=width, height=height, port=port, host=host)
 
 
 def parse_args():
@@ -199,6 +210,7 @@ def parse_args():
     parser.add_argument("--width", type=int, default=768, help="Render width")
     parser.add_argument("--height", type=int, default=432, help="Render height")
     parser.add_argument("--port", type=int, default=8080, help="Viser server port")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Viser server host")
     parser.add_argument("--device", type=str, default="cuda", help="Device")
     return parser.parse_args()
 
@@ -212,6 +224,7 @@ if __name__ == "__main__":
         width=args.width,
         height=args.height,
         port=args.port,
+        host=args.host,
         device=args.device,
     )
     viewer.run()
