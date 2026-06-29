@@ -34,7 +34,6 @@ from src.utils.experiment import (
     prepare_output_dir,
     save_json,
     save_run_metadata,
-    update_latest_symlink,
     utc_timestamp,
 )
 
@@ -84,17 +83,9 @@ def main():
     config_path = save_run_metadata(
         output_dir,
         stage="ba_custom",
-        params={
-            "huber_delta": args.huber_delta,
-            "max_nfev": args.max_nfev,
-            "outlier_threshold": args.outlier_threshold,
-            "n_fixed_cameras": args.n_fixed_cameras,
-            "camera_type": args.camera_type,
-            "no_outlier_removal": args.no_outlier_removal,
-            "no_colmap_export": args.no_colmap_export,
-            "verbose": args.verbose,
-        },
+        params=vars(args),
         inputs={"input_reconstruction": os.path.abspath(args.input)},
+        outputs={"output_dir": output_dir},
     )
     print(f"Saved run config: {config_path}")
 
@@ -171,7 +162,6 @@ def main():
         "stats": stats,
         "output_dir": output_dir,
     })
-    update_latest_symlink(args.output, output_dir)
 
     return 0 if not stats.get('failed', False) else 1
 

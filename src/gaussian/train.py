@@ -34,7 +34,6 @@ from src.utils.experiment import (
     prepare_output_dir,
     save_json,
     save_run_metadata,
-    update_latest_symlink,
     utc_timestamp,
 )
 
@@ -156,29 +155,12 @@ def main():
     config_path = save_run_metadata(
         output_dir,
         stage="gaussian_train",
-        params={
-            "n_iterations": args.n_iterations,
-            "resolution": args.resolution,
-            "init_mode": args.init_mode,
-            "max_init_gaussians": args.max_init_gaussians,
-            "random_init_gaussians": args.random_init_gaussians,
-            "max_n_gaussians": args.max_n_gaussians,
-            "scale_factor": args.scale_factor,
-            "l1_weight": args.l1_weight,
-            "ssim_weight": args.ssim_weight,
-            "densify_from": args.densify_from,
-            "densify_until": args.densify_until,
-            "densify_interval": args.densify_interval,
-            "sh_degree": args.sh_degree,
-            "val_every": args.val_every,
-            "seed": args.seed,
-            "device": device,
-        },
+        params={**vars(args), "resolved_device": device},
         inputs={
             "reconstruction": os.path.abspath(args.reconstruction),
             "image_dir": os.path.abspath(args.image_dir),
-            "output_dir": output_dir,
         },
+        outputs={"output_dir": output_dir},
     )
     print(f"Saved run config: {config_path}")
 
@@ -276,7 +258,6 @@ def main():
             "image_dir": os.path.abspath(args.image_dir),
             "output_dir": output_dir,
         })
-        update_latest_symlink(args.output, output_dir)
         print("\nTraining complete!")
         print(f"  Final PSNR: {metrics.get('psnr', 0):.2f} dB")
         print(f"  Final SSIM: {metrics.get('ssim', 0):.4f}")

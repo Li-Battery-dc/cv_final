@@ -48,12 +48,16 @@ from vggt.dependency.track_predict import predict_tracks
 from vggt.dependency.projection import project_3D_points_np
 
 from src.data.reconstruction import Reconstruction
+from src.data.mask_filter import filter_reconstruction_by_masks
 from src.data.colmap_io import reconstruction_to_colmap_space, reconstruction_to_colmap_sparse
+from src.improvement.geometry_filter import (
+    build_filtered_dense_reconstruction,
+    save_dense_ply,
+)
 from src.utils.experiment import (
     prepare_output_dir,
     save_json,
     save_run_metadata,
-    update_latest_symlink,
     utc_timestamp,
 )
 
@@ -95,6 +99,24 @@ def parse_args():
                         help="Depth confidence threshold (used for dense point cloud)")
     parser.add_argument("--max_dense_points", type=int, default=100000,
                         help="Max dense points for .ply export")
+    parser.add_argument("--enable_point_head", action="store_true", default=False,
+                        help="Also run VGGT direct point-map head for geometry consistency checks")
+    parser.add_argument("--save_dense_filtered_reconstruction", action="store_true", default=False,
+                        help="Save a depth-camera dense Reconstruction filtered by point-map and reprojection consistency")
+    parser.add_argument("--dense_filter_disagreement_percentile", type=float, default=70.0,
+                        help="Keep depth/point-map disagreement below this scene percentile")
+    parser.add_argument("--dense_filter_reproj_percentile", type=float, default=70.0,
+                        help="Keep neighbor reprojection depth error below this scene percentile")
+    parser.add_argument("--dense_filter_min_votes", type=int, default=1,
+                        help="Minimum passing neighbor views for dense point retention")
+    parser.add_argument("--mask_dir", type=str, default=None,
+                        help="Optional foreground masks aligned with scene images")
+    parser.add_argument("--mask_foreground_threshold", type=float, default=0.5,
+                        help="Mask value threshold for foreground observations")
+    parser.add_argument("--mask_min_observations", type=int, default=2,
+                        help="Minimum foreground observations to keep a 3D point")
+    parser.add_argument("--mask_min_ratio", type=float, default=0.5,
+                        help="Minimum foreground observation ratio to keep a 3D point")
     return parser.parse_args()
 
 
@@ -117,7 +139,8 @@ def load_vggt_model(device, dtype):
     return model
 
 
-def run_vggt_inference(model, images, dtype, device, vggt_resolution=518):
+def run_vggt_inference(model, images, dtype, device, vggt_resolution=518,
+                       return_frame_features=False, return_point_map=False):
     """Run VGGT: camera pose + depth estimation.
 
     Args:
@@ -130,8 +153,8 @@ def run_vggt_inference(model, images, dtype, device, vggt_resolution=518):
     Returns:
         extrinsic: (S, 3, 4) numpy camera-from-world.
         intrinsic: (S, 3, 3) numpy intrinsics (at vggt_resolution).
-        depth_map: (S, 1, H_vggt, W_vggt) numpy.
-        depth_conf: (S, 1, H_vggt, W_vggt) numpy.
+        depth_map: (S, H_vggt, W_vggt, 1) numpy.
+        depth_conf: (S, H_vggt, W_vggt) numpy.
     """
     images_resized = F.interpolate(images, size=(vggt_resolution, vggt_resolution),
                                    mode="bilinear", align_corners=False)
@@ -146,12 +169,32 @@ def run_vggt_inference(model, images, dtype, device, vggt_resolution=518):
 
         depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images_batch, ps_idx)
 
+        frame_features = None
+        if return_frame_features:
+            last_tokens = aggregated_tokens_list[-1]
+            patch_tokens = last_tokens[:, :, ps_idx:]
+            frame_features = patch_tokens.mean(dim=2)
+            frame_features = F.normalize(frame_features.float(), dim=-1)
+
+        point_map = None
+        point_conf = None
+        if return_point_map:
+            if model.point_head is None:
+                raise ValueError("VGGT model was created without point_head")
+            point_map, point_conf = model.point_head(aggregated_tokens_list, images_batch, ps_idx)
+
     extrinsic = extrinsic.squeeze(0).cpu().numpy()
     intrinsic = intrinsic.squeeze(0).cpu().numpy()
     depth_map = depth_map.squeeze(0).cpu().numpy()
     depth_conf = depth_conf.squeeze(0).cpu().numpy()
+    if frame_features is not None:
+        frame_features = frame_features.squeeze(0).cpu().numpy()
+    if point_map is not None:
+        point_map = point_map.squeeze(0).cpu().numpy()
+    if point_conf is not None:
+        point_conf = point_conf.squeeze(0).cpu().numpy()
 
-    return extrinsic, intrinsic, depth_map, depth_conf
+    return extrinsic, intrinsic, depth_map, depth_conf, frame_features, point_map, point_conf
 
 
 def compute_image_size_hw(original_coords_np: np.ndarray) -> np.ndarray:
@@ -186,11 +229,10 @@ def save_dense_point_cloud(images, points_3d_dense, depth_conf, args, output_dir
 
 def save_vggt_cache(path, image_names, image_size_hw, original_coords_np,
                     extrinsic, intrinsic, depth_map, depth_conf, points_3d_dense,
-                    args):
+                    args, frame_features=None, point_map=None, point_conf=None):
     """Save VGGT-only outputs so VGGSfM tracking can be run later."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    np.savez_compressed(
-        path,
+    payload = dict(
         image_names=np.array(image_names, dtype=str),
         image_size_hw=image_size_hw.astype(np.int32),
         original_coords=original_coords_np,
@@ -202,6 +244,13 @@ def save_vggt_cache(path, image_names, image_size_hw, original_coords_np,
         img_load_resolution=np.array(args.img_load_resolution, dtype=np.int32),
         vggt_resolution=np.array(args.vggt_resolution, dtype=np.int32),
     )
+    if frame_features is not None:
+        payload["frame_features"] = frame_features
+    if point_map is not None:
+        payload["point_map"] = point_map
+    if point_conf is not None:
+        payload["point_conf"] = point_conf
+    np.savez_compressed(path, **payload)
     print(f"Saved VGGT cache to {path}")
 
 
@@ -217,6 +266,9 @@ def load_vggt_cache(path):
         "depth_map": data["depth_map"],
         "depth_conf": data["depth_conf"],
         "points_3d_dense": data["points_3d_dense"],
+        "frame_features": data["frame_features"] if "frame_features" in data else None,
+        "point_map": data["point_map"] if "point_map" in data else None,
+        "point_conf": data["point_conf"] if "point_conf" in data else None,
         "img_load_resolution": int(data["img_load_resolution"]),
         "vggt_resolution": int(data["vggt_resolution"]),
     }
@@ -241,6 +293,10 @@ def main():
     set_seed(args.seed)
     stage_times = {}
     dense_count = None
+    dense_filtered_count = None
+    dense_filtered_npz_path = None
+    dense_filtered_ply_path = None
+    dense_filter_stats = None
     ply_path = None
     npz_path = None
     sparse_dir = None
@@ -270,24 +326,14 @@ def main():
     config_path = save_run_metadata(
         output_dir,
         stage="vggt_export",
-        params={
-            "stage": args.stage,
-            "img_load_resolution": args.img_load_resolution,
-            "vggt_resolution": args.vggt_resolution,
-            "max_query_pts": args.max_query_pts,
-            "query_frame_num": args.query_frame_num,
-            "vis_thresh": args.vis_thresh,
-            "max_reproj_error": args.max_reproj_error,
-            "min_visible_frames": args.min_visible_frames,
-            "fine_tracking": args.fine_tracking,
-            "camera_type": args.camera_type,
-        },
+        params=vars(args),
         inputs={
             "scene_dir": scene_dir,
             "image_dir": image_dir,
             "image_count": len(image_paths),
-            "output_dir": output_dir,
+            "mask_dir": os.path.abspath(args.mask_dir) if args.mask_dir else None,
         },
+        outputs={"output_dir": output_dir, "vggt_cache": vggt_cache},
     )
     print(f"Saved run config: {config_path}")
 
@@ -303,10 +349,12 @@ def main():
         print("Running VGGT inference...")
         t0 = time.time()
         model = load_vggt_model(device, dtype)
-        extrinsic, intrinsic, depth_map, depth_conf = run_vggt_inference(
+        extrinsic, intrinsic, depth_map, depth_conf, frame_features, point_map, point_conf = run_vggt_inference(
             model=model,
             images=images, dtype=dtype, device=device,
             vggt_resolution=args.vggt_resolution,
+            return_frame_features=True,
+            return_point_map=args.enable_point_head or args.save_dense_filtered_reconstruction,
         )
         del model
         gc.collect()
@@ -320,6 +368,7 @@ def main():
         save_vggt_cache(
             vggt_cache, image_names, image_size_hw, original_coords_np,
             extrinsic, intrinsic, depth_map, depth_conf, points_3d_dense, args,
+            frame_features=frame_features, point_map=point_map, point_conf=point_conf,
         )
         ply_path, dense_count = save_dense_point_cloud(
             images, points_3d_dense, depth_conf, args, output_dir,
@@ -343,7 +392,6 @@ def main():
                 "output_ply": ply_path,
                 **stage_times,
             })
-            update_latest_symlink(args.output_dir, output_dir)
             return 0
     else:
         # ---- Load cached VGGT outputs ----
@@ -367,7 +415,16 @@ def main():
         extrinsic = cache["extrinsic"]
         intrinsic = cache["intrinsic"]
         depth_conf = cache["depth_conf"]
+        depth_map = cache["depth_map"]
         points_3d_dense = cache["points_3d_dense"]
+        frame_features = cache.get("frame_features")
+        point_map = cache.get("point_map")
+        point_conf = cache.get("point_conf")
+        if args.save_dense_filtered_reconstruction and point_map is None:
+            raise ValueError(
+                "VGGT cache has no point_map. Re-run --stage vggt/all with --enable_point_head "
+                "before requesting --save_dense_filtered_reconstruction."
+            )
 
     # ---- Step 2: Track Prediction ----
     print("Running track prediction...")
@@ -411,6 +468,71 @@ def main():
     )
     print(f"Reconstruction: {recon}")
 
+    if args.save_dense_filtered_reconstruction:
+        if point_map is None:
+            raise ValueError("--save_dense_filtered_reconstruction requires --enable_point_head")
+        print("Building filtered dense depth-camera reconstruction...")
+        t0 = time.time()
+        images_vggt = F.interpolate(images, size=(args.vggt_resolution, args.vggt_resolution),
+                                    mode="bilinear", align_corners=False)
+        images_np = (images_vggt.detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        images_np = images_np.transpose(0, 2, 3, 1)
+        dense_result = build_filtered_dense_reconstruction(
+            image_names=image_names,
+            image_size_hw=image_size_hw,
+            intrinsics=intrinsic,
+            extrinsics=extrinsic,
+            depth_map=depth_map,
+            depth_conf=depth_conf,
+            points_depth=points_3d_dense,
+            points_point=point_map,
+            images_np=images_np,
+            disagreement_percentile=args.dense_filter_disagreement_percentile,
+            reproj_percentile=args.dense_filter_reproj_percentile,
+            min_reproj_votes=args.dense_filter_min_votes,
+            max_points=args.max_dense_points,
+            rng=np.random.default_rng(args.seed),
+            metadata={
+                "original_coords": original_coords_np,
+                "img_load_resolution": args.img_load_resolution,
+                "vggt_resolution": args.vggt_resolution,
+                "vggt_cache": vggt_cache,
+                "run_stage": "vggt_export_dense_filtered",
+                "run_timestamp_utc": utc_timestamp(),
+            },
+        )
+        dense_result.reconstruction.intrinsics = intrinsic_scaled.copy()
+        dense_result.reconstruction.metadata["filter_intrinsics_space"] = "vggt_resolution"
+        dense_result.reconstruction.metadata["output_intrinsics_space"] = "img_load_resolution"
+        dense_filtered_npz_path = os.path.join(output_dir, "reconstruction_dense_filtered.npz")
+        dense_result.reconstruction.to_npz(dense_filtered_npz_path)
+        dense_filtered_ply_path = os.path.join(output_dir, "points3d_dense_filtered.ply")
+        save_dense_ply(
+            dense_filtered_ply_path,
+            dense_result.reconstruction.points3d,
+            dense_result.reconstruction.points_rgb,
+        )
+        dense_filter_stats = dense_result.stats
+        dense_filtered_count = dense_result.reconstruction.num_points
+        save_json(os.path.join(output_dir, "geometry_filter_stats.json"), dense_filter_stats)
+        stage_times['dense_geometry_filter_seconds'] = time.time() - t0
+        print(
+            f"Filtered dense reconstruction: {dense_filtered_count} pts -> "
+            f"{dense_filtered_npz_path}"
+        )
+
+    mask_filter_stats = None
+    if args.mask_dir:
+        print(f"Filtering reconstruction with masks from {args.mask_dir}")
+        recon, mask_filter_stats = filter_reconstruction_by_masks(
+            recon,
+            mask_dir=args.mask_dir,
+            threshold=args.mask_foreground_threshold,
+            min_observations=args.mask_min_observations,
+            min_ratio=args.mask_min_ratio,
+        )
+        print(f"Mask-filtered reconstruction: {recon}")
+
     recon.metadata['vis_thresh'] = args.vis_thresh
     recon.metadata['max_reproj_error'] = args.max_reproj_error
     recon.metadata['min_visible_frames'] = args.min_visible_frames
@@ -418,6 +540,12 @@ def main():
     recon.metadata['img_load_resolution'] = args.img_load_resolution
     recon.metadata['original_coords'] = original_coords_np
     recon.metadata['vggt_cache'] = vggt_cache
+    if frame_features is not None:
+        recon.metadata['frame_features_in_cache'] = True
+    if point_map is not None:
+        recon.metadata['point_map_in_cache'] = True
+    if dense_filtered_npz_path:
+        recon.metadata['dense_filtered_reconstruction'] = dense_filtered_npz_path
     recon.metadata['run_stage'] = 'vggt_export'
     recon.metadata['run_timestamp_utc'] = utc_timestamp()
     recon.metadata['run_config_path'] = config_path
@@ -434,6 +562,8 @@ def main():
     print(f"  Track points:     {recon.num_points}")
     print(f"  Observations:     {recon.num_observations}")
     print(f"  VGGT cache:       {vggt_cache}")
+    if dense_filtered_npz_path:
+        print(f"  Dense filtered:   {dense_filtered_count} pts")
     print(f"  Output .npz:      {npz_path}")
     print(f"  Output COLMAP:    {sparse_dir}")
     print("=" * 60)
@@ -446,9 +576,13 @@ def main():
         "vggt_cache": vggt_cache,
         "output_npz": npz_path,
         "output_colmap": sparse_dir,
+        "dense_filtered_npz": dense_filtered_npz_path,
+        "dense_filtered_ply": dense_filtered_ply_path,
+        "dense_filtered_points": dense_filtered_count,
+        "dense_filter": dense_filter_stats,
+        "mask_filter": mask_filter_stats,
         **stage_times,
     })
-    update_latest_symlink(args.output_dir, output_dir)
 
     return 0
 

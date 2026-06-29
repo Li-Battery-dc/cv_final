@@ -9,18 +9,19 @@ import shutil
 import subprocess
 import sys
 import numpy as np
+from PIL import Image
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src.data.colmap_io import reconstruction_to_colmap_sparse
+from src.data.colmap_io import reconstruction_to_colmap_space, reconstruction_to_colmap_sparse
+from src.data.mask_filter import filter_reconstruction_by_masks
 from src.data.reconstruction import Reconstruction
 from src.utils.experiment import (
     prepare_output_dir,
     save_json,
     save_run_metadata,
-    update_latest_symlink,
     utc_timestamp,
 )
 
@@ -61,6 +62,22 @@ def parse_args():
     parser.add_argument("--skip_render_metrics", action="store_true", default=False,
                         help="Skip official render.py / metrics.py after training")
     parser.add_argument("--white_background", action="store_true", default=False)
+    parser.add_argument("--mask_dir", type=str, default=None,
+                        help="Optional foreground masks aligned with image names")
+    parser.add_argument("--mask_background", type=str, default="none",
+                        choices=("none", "white", "black"),
+                        help="Composite masked images onto a constant background")
+    parser.add_argument("--mask_points", action=argparse.BooleanOptionalAction, default=False,
+                        help="Filter reconstruction points/observations by foreground masks before COLMAP export")
+    parser.add_argument("--mask_foreground_threshold", type=float, default=0.5)
+    parser.add_argument("--mask_min_observations", type=int, default=2)
+    parser.add_argument("--mask_min_ratio", type=float, default=0.5)
+    parser.add_argument("--test_every", type=int, default=None,
+                        help="Write sparse/0/test.txt using every Nth sorted image as test")
+    parser.add_argument("--test_names", nargs="*", default=None,
+                        help="Explicit image names to write to sparse/0/test.txt")
+    parser.add_argument("--test_list", type=str, default=None,
+                        help="Text file containing one test image name per line")
     return parser.parse_args()
 
 
@@ -82,6 +99,84 @@ def _link_or_copy(src: str, dst: str):
             shutil.copytree(src, dst)
         else:
             shutil.copy2(src, dst)
+
+
+def _find_mask(mask_dir: str, image_name: str) -> str:
+    stem, _ = os.path.splitext(os.path.basename(image_name))
+    for candidate in (
+        os.path.join(mask_dir, image_name),
+        os.path.join(mask_dir, f"{stem}.png"),
+        os.path.join(mask_dir, f"{stem}.jpg"),
+        os.path.join(mask_dir, f"{stem}.jpeg"),
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    raise FileNotFoundError(f"No mask found for {image_name!r} in {mask_dir}")
+
+
+def _prepare_images(image_dir: str, output_image_dir: str, args) -> dict:
+    if args.mask_background == "none":
+        _link_or_copy(image_dir, output_image_dir)
+        return {"mode": "linked", "image_dir": os.path.abspath(image_dir)}
+
+    if not args.mask_dir:
+        raise ValueError("--mask_background requires --mask_dir")
+
+    os.makedirs(output_image_dir, exist_ok=True)
+    bg_value = 255 if args.mask_background == "white" else 0
+    image_names = sorted(
+        name for name in os.listdir(image_dir)
+        if os.path.isfile(os.path.join(image_dir, name))
+    )
+    for name in image_names:
+        image = Image.open(os.path.join(image_dir, name)).convert("RGB")
+        mask = Image.open(_find_mask(args.mask_dir, name)).convert("L")
+        if mask.size != image.size:
+            mask = mask.resize(image.size, Image.Resampling.NEAREST)
+        mask_np = (np.asarray(mask, dtype=np.float32) / 255.0) >= args.mask_foreground_threshold
+        image_np = np.asarray(image, dtype=np.uint8)
+        bg = np.full_like(image_np, bg_value, dtype=np.uint8)
+        out = np.where(mask_np[..., None], image_np, bg)
+        Image.fromarray(out).save(os.path.join(output_image_dir, name))
+
+    return {
+        "mode": args.mask_background,
+        "mask_dir": os.path.abspath(args.mask_dir),
+        "image_count": len(image_names),
+    }
+
+
+def _test_names_from_args(args, image_names: list[str]) -> list[str]:
+    names = []
+    if args.test_list:
+        with open(args.test_list, "r", encoding="utf-8") as f:
+            names.extend(line.strip() for line in f if line.strip())
+    if args.test_names:
+        names.extend(args.test_names)
+    if args.test_every:
+        if args.test_every <= 0:
+            raise ValueError("--test_every must be positive")
+        names.extend(name for idx, name in enumerate(sorted(image_names)) if idx % args.test_every == 0)
+    return sorted(dict.fromkeys(names))
+
+
+def _write_test_split(sparse_target: str, image_names: list[str], args) -> dict | None:
+    test_names = _test_names_from_args(args, image_names)
+    if not test_names:
+        return None
+    valid = set(image_names)
+    missing = [name for name in test_names if name not in valid]
+    if missing:
+        raise ValueError(f"Test split names not found in image_dir: {missing}")
+    path = os.path.join(sparse_target, "test.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        for name in test_names:
+            f.write(f"{name}\n")
+    return {
+        "test_txt": os.path.abspath(path),
+        "test_count": len(test_names),
+        "test_names": test_names,
+    }
 
 
 def _camera_centers(extrinsics: np.ndarray) -> np.ndarray:
@@ -138,15 +233,33 @@ def _prepare_scene(args, output: str) -> str:
     prepared_scene = os.path.join(output, "prepared_scene")
     sparse_target = os.path.join(prepared_scene, "sparse", "0")
     os.makedirs(os.path.join(prepared_scene, "sparse"), exist_ok=True)
-    _link_or_copy(args.image_dir, os.path.join(prepared_scene, "images"))
+    image_prep_info = _prepare_images(args.image_dir, os.path.join(prepared_scene, "images"), args)
+    image_names = sorted(
+        name for name in os.listdir(args.image_dir)
+        if os.path.isfile(os.path.join(args.image_dir, name))
+    )
 
     random_init_info = None
+    mask_filter_info = None
     if args.sparse_dir:
         if args.init_mode == "random":
             raise ValueError("--init_mode=random requires --reconstruction so the random bbox can be defined")
-        _link_or_copy(args.sparse_dir, sparse_target)
+        if os.path.lexists(sparse_target):
+            _replace_path(sparse_target)
+        shutil.copytree(args.sparse_dir, sparse_target)
     else:
         recon = Reconstruction.from_npz(args.reconstruction)
+        if args.mask_points:
+            if not args.mask_dir:
+                raise ValueError("--mask_points requires --mask_dir")
+            recon = reconstruction_to_colmap_space(recon)
+            recon, mask_filter_info = filter_reconstruction_by_masks(
+                recon,
+                mask_dir=args.mask_dir,
+                threshold=args.mask_foreground_threshold,
+                min_observations=args.mask_min_observations,
+                min_ratio=args.mask_min_ratio,
+            )
         os.makedirs(sparse_target, exist_ok=True)
         reconstruction_to_colmap_sparse(recon, sparse_target, args.camera_type)
         if args.init_mode == "random":
@@ -157,7 +270,13 @@ def _prepare_scene(args, output: str) -> str:
                 args.random_seed,
             )
 
-    return prepared_scene, random_init_info
+    test_split_info = _write_test_split(sparse_target, image_names, args)
+    return prepared_scene, {
+        "images": image_prep_info,
+        "random_init": random_init_info,
+        "mask_filter": mask_filter_info,
+        "test_split": test_split_info,
+    }
 
 
 def _run(cmd: list[str], cwd: str, env: dict[str, str] | None = None):
@@ -197,29 +316,19 @@ def main():
     config_path = save_run_metadata(
         output,
         stage="gaussian_official",
-        params={
-            "camera_type": args.camera_type,
-            "init_mode": args.init_mode,
-            "random_init_points": args.random_init_points,
-            "random_seed": args.random_seed,
-            "iterations": args.iterations,
-            "resolution": args.resolution,
-            "sh_degree": args.sh_degree,
-            "skip_render_metrics": args.skip_render_metrics,
-            "white_background": args.white_background,
-            "official_python": official_python,
-        },
+        params={**vars(args), "official_python": official_python},
         inputs={
             "repo": repo,
             "reconstruction": os.path.abspath(args.reconstruction) if args.reconstruction else None,
             "sparse_dir": os.path.abspath(args.sparse_dir) if args.sparse_dir else None,
             "image_dir": os.path.abspath(args.image_dir),
-            "output_dir": output,
+            "mask_dir": os.path.abspath(args.mask_dir) if args.mask_dir else None,
         },
+        outputs={"output_dir": output},
     )
     print(f"Saved run config: {config_path}")
 
-    prepared_scene, random_init_info = _prepare_scene(args, output)
+    prepared_scene, prepare_info = _prepare_scene(args, output)
     train_py = os.path.join(repo, "train.py")
     render_py = os.path.join(repo, "render.py")
     metrics_py = os.path.join(repo, "metrics.py")
@@ -274,9 +383,8 @@ def main():
         "results_json": os.path.join(output, "results.json") if os.path.exists(os.path.join(output, "results.json")) else None,
         "per_view_json": os.path.join(output, "per_view.json") if os.path.exists(os.path.join(output, "per_view.json")) else None,
         "output_dir": output,
-        "random_init": random_init_info,
+        **prepare_info,
     })
-    update_latest_symlink(args.output, output)
     print(f"Official 3DGS output: {output}")
     return 0
 

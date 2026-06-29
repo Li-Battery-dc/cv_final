@@ -1,0 +1,10 @@
+scene,method,PSNR,SSIM,LPIPS,test_views,path,gaussians,time_seconds
+scene,official raw,20.728656768798828,0.7540476322174072,0.24675793945789337,8,data/scene/gs_official_raw/runs/20260627_135803_gaussian_official,,
+scene,official BA,22.471378326416016,0.8201104402542114,0.19723525643348694,8,data/scene/gs_official_ba/runs/20260627_133737_gaussian_official,,
+scene,official raw random init,20.3172607421875,0.7420286536216736,0.2643525004386902,8,data/scene/gs_official_random_raw/runs/20260627_141252_gaussian_official,,
+scene,official BA random init,21.983383178710938,0.806120753288269,0.21539026498794556,8,data/scene/gs_official_random_ba/runs/20260627_140637_gaussian_official,,
+scene,custom BA renderer,16.399215005910307,0.5697032138705254,,8,data/scene/gs_custom_ba,100619,126.17805910110474
+1-human,official BA,19.00848960876465,0.9275953769683838,0.11768834292888641,2,data/1-human/gs_official_ba/runs/20260629_054234_gaussian_official,,
+1-human,official BA random init,19.06904411315918,0.9335262179374695,0.1077805906534195,2,data/1-human/gs_official_random/runs/20260629_054353_gaussian_official,,
+1-human,high-density BA masked-white official 3DGS,26.43545150756836,0.9589553475379944,0.030644439160823822,8,data/1-human/gs_official_ba_hq_masked/runs/20260629_084243_gaussian_official,,
+2-human,high-density BA masked-white official 3DGS,28.62352180480957,0.9675890207290649,0.024166611954569817,8,data/2-human/gs_official_ba_hq_masked/runs/20260629_085004_gaussian_official,,

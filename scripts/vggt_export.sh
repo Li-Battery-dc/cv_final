@@ -23,22 +23,24 @@ CAMERA_TYPE="${CAMERA_TYPE:-PINHOLE}"
 FINE_TRACKING="${FINE_TRACKING:-1}"
 
 IMAGE_RESOLUTION="${IMAGE_RESOLUTION:-448}"
+MASK_DIR="${MASK_DIR:-}"
+MASK_FOREGROUND_THRESHOLD="${MASK_FOREGROUND_THRESHOLD:-0.5}"
+MASK_MIN_OBSERVATIONS="${MASK_MIN_OBSERVATIONS:-2}"
+MASK_MIN_RATIO="${MASK_MIN_RATIO:-0.5}"
+ENABLE_POINT_HEAD="${ENABLE_POINT_HEAD:-0}"
+SAVE_DENSE_FILTERED_RECONSTRUCTION="${SAVE_DENSE_FILTERED_RECONSTRUCTION:-0}"
+DENSE_FILTER_DISAGREEMENT_PERCENTILE="${DENSE_FILTER_DISAGREEMENT_PERCENTILE:-70}"
+DENSE_FILTER_REPROJ_PERCENTILE="${DENSE_FILTER_REPROJ_PERCENTILE:-70}"
+DENSE_FILTER_MIN_VOTES="${DENSE_FILTER_MIN_VOTES:-1}"
 
 source "$VENV_PATH/bin/activate"
 cd "$PROJECT_ROOT"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 export CUDA_VISIBLE_DEVICES
 
-PREV_VGGT_CACHE="$OUTPUT_ROOT/latest/vggt_predictions.npz"
-if [[ ! -e "$PREV_VGGT_CACHE" ]]; then
-    PREV_VGGT_CACHE="$OUTPUT_ROOT/vggt_predictions.npz"
-fi
-if [[ -z "$VGGT_CACHE" ]]; then
-    if [[ "$STAGE" == "tracks" && -e "$PREV_VGGT_CACHE" ]]; then
-        VGGT_CACHE="$PREV_VGGT_CACHE"
-    else
-        VGGT_CACHE=""
-    fi
+if [[ "$STAGE" == "tracks" && -z "$VGGT_CACHE" ]]; then
+    echo "ERROR: STAGE=tracks requires an explicit VGGT_CACHE path. latest symlinks are no longer used." >&2
+    exit 2
 fi
 
 echo "============================================"
@@ -55,6 +57,9 @@ echo "  Fine tracking:  $FINE_TRACKING"
 echo "  Vis thresh:     $VIS_THRESH"
 echo "  Reproj error:   $MAX_REPROJ_ERROR"
 echo "  Min vis frames: $MIN_VISIBLE_FRAMES"
+echo "  Mask dir:       $MASK_DIR"
+echo "  Point head:     $ENABLE_POINT_HEAD"
+echo "  Dense filtered: $SAVE_DENSE_FILTERED_RECONSTRUCTION"
 echo "============================================"
 
 CMD=(python -m src.vggt_export
@@ -67,7 +72,7 @@ CMD=(python -m src.vggt_export
     --vis_thresh "$VIS_THRESH"
     --max_reproj_error "$MAX_REPROJ_ERROR"
     --min_visible_frames "$MIN_VISIBLE_FRAMES"
-    --conf_thres_value 2.0 # dense point export confidence threshold, 2.0 for this specific scene. 
+    --conf_thres_value 2.0
     --camera_type "$CAMERA_TYPE")
 
 if [[ -n "$OUTPUT_RUN_DIR" ]]; then
@@ -76,14 +81,29 @@ fi
 if [[ -n "$VGGT_CACHE" ]]; then
     CMD+=(--vggt_cache "$VGGT_CACHE")
 fi
+if [[ -n "$MASK_DIR" ]]; then
+    CMD+=(--mask_dir "$MASK_DIR"
+        --mask_foreground_threshold "$MASK_FOREGROUND_THRESHOLD"
+        --mask_min_observations "$MASK_MIN_OBSERVATIONS"
+        --mask_min_ratio "$MASK_MIN_RATIO")
+fi
 if [[ "$FINE_TRACKING" = "1" ]]; then
     CMD+=(--fine_tracking)
 else
     CMD+=(--no-fine_tracking)
+fi
+if [[ "$ENABLE_POINT_HEAD" = "1" ]]; then
+    CMD+=(--enable_point_head)
+fi
+if [[ "$SAVE_DENSE_FILTERED_RECONSTRUCTION" = "1" ]]; then
+    CMD+=(--save_dense_filtered_reconstruction
+        --dense_filter_disagreement_percentile "$DENSE_FILTER_DISAGREEMENT_PERCENTILE"
+        --dense_filter_reproj_percentile "$DENSE_FILTER_REPROJ_PERCENTILE"
+        --dense_filter_min_votes "$DENSE_FILTER_MIN_VOTES")
 fi
 
 "${CMD[@]}"
 
 echo ""
 echo "Done! Output root: $OUTPUT_ROOT"
-echo "Latest run: $OUTPUT_ROOT/latest"
+echo "Run directory is printed above and recorded in run_config.json. latest symlinks are not updated."

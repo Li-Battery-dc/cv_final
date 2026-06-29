@@ -5,7 +5,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-$HOME/cv_final}"
 VENV_PATH="${VENV_PATH:-$PROJECT_ROOT/.venv}"
 SCENE_DIR="${SCENE_DIR:-$PROJECT_ROOT/data/scene}"
 
-INPUT_RECON="${INPUT_RECON:-/home/dhr/cv_final/data/scene/vggt_raw/runs/20260627_074913_vggt_export/reconstruction.npz}"
+INPUT_RECON="${INPUT_RECON:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$SCENE_DIR/ba_pycolmap}"
 OUTPUT_RUN_DIR="${OUTPUT_RUN_DIR:-}"
 
@@ -22,6 +22,11 @@ PRINT_SOLVER_SUMMARY="${PRINT_SOLVER_SUMMARY:-0}"
 
 source "$VENV_PATH/bin/activate"
 cd "$PROJECT_ROOT"
+
+if [[ -z "$INPUT_RECON" ]]; then
+    echo "ERROR: set INPUT_RECON to an explicit reconstruction.npz path." >&2
+    exit 2
+fi
 
 echo "============================================"
 echo "  PyCOLMAP BA"
@@ -74,4 +79,4 @@ echo "  - summary.json"
 if [[ "$NO_COLMAP_EXPORT" != "1" && "$NO_COLMAP_EXPORT" != "true" && "$NO_COLMAP_EXPORT" != "TRUE" ]]; then
     echo "  - sparse/"
 fi
-echo "Latest run: $OUTPUT_ROOT/latest"
+echo "Run directory is printed above and recorded in run_config.json. latest symlinks are not updated."

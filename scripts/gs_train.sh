@@ -57,10 +57,8 @@ cd "$PROJECT_ROOT"
 export CUDA_VISIBLE_DEVICES
 
 if [[ -z "$RECONSTRUCTION" ]]; then
-    RECONSTRUCTION="$SCENE_DIR/ba_custom/latest/reconstruction.npz"
-    if [[ ! -e "$RECONSTRUCTION" ]]; then
-        RECONSTRUCTION="$SCENE_DIR/ba_custom/reconstruction.npz"
-    fi
+    echo "ERROR: set RECONSTRUCTION to an explicit reconstruction.npz path. latest symlinks are no longer used." >&2
+    exit 2
 fi
 
 echo "============================================"
@@ -130,4 +128,4 @@ echo "  - checkpoints/latest.pt"
 echo "  - validation/"
 echo "  - final.ply"
 echo "  - metrics.json"
-echo "Latest run: $OUTPUT_ROOT/latest"
+echo "Run directory is printed above and recorded in run_config.json. latest symlinks are not updated."
