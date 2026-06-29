@@ -56,31 +56,6 @@ uv pip install -e packages/LightGlue
 uv pip install lpips
 ```
 
-> **关于 numpy 版本**：VGGT 上游要求 `numpy<2`，但本项目通过 `sys.path` 引用 VGGT 而非 `pip install`，因此不会触发 numpy 版本冲突检查。
-
-### 手动安装 (备选，不推荐)
-
-如果你不能使用 uv，以下是等效的 pip 安装命令：
-
-```bash
-uv python install 3.11
-uv venv .venv --python 3.11 --seed
-source .venv/bin/activate
-
-python -m pip install --upgrade pip setuptools wheel
-
-python -m pip install torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/cu128
-
-python -m pip install numpy pillow huggingface_hub einops safetensors
-python -m pip install tqdm hydra-core omegaconf scipy opencv-python matplotlib trimesh requests
-python -m pip install gradio viser pydantic "httpx[socks]" fastapi uvicorn
-python -m pip install pycolmap pyceres kornia loguru plyfile scikit-image imageio
-python -m pip install gsplat
-
-cd packages/LightGlue && python -m pip install -e . && cd ../..
-```
-
 ## 快速开始
 
 ### Phase 1: VGGT 图像初步提取
@@ -138,32 +113,6 @@ python -m src.gaussian.train \
 #   outputs/gs_custom_ba/metrics.json     (训练曲线)
 ```
 
-### 交互浏览
-
-```bash
-python -m src.gaussian.viewer \
-    --checkpoint outputs/gs_custom_ba/checkpoints/latest.pt \
-    --port 8080
-# 浏览器打开 http://localhost:8080
-```
-
-## 运行测试
-
-```bash
-source .venv/bin/activate
-cd ~/cv_final
-
-# 逐项运行
-python src/tests/test_so3.py              # SO(3) 旋转测试
-python src/tests/test_projection.py        # 投影一致性测试
-python src/tests/test_colmap_roundtrip.py  # COLMAP 转换测试
-python src/tests/test_ba_synthetic.py      # 合成 BA 测试
-
-# 或使用 pytest (需安装)
-pip install pytest
-PYTHONPATH=src:vggt python -m pytest src/tests/ -v
-```
-
 ## 实验对照
 
 | 实验 | BA | 3DGS | 目的 |
@@ -175,13 +124,3 @@ PYTHONPATH=src:vggt python -m pytest src/tests/ -v
 | E | VGGT 改进(预留) | 自研 | 论文改进实验 |
 
 详见 [`docs/design.md`](docs/design.md)。
-
-## 硬件要求
-
-| 组件 | 本地开发 | 远程训练 (推荐) |
-|------|----------|-----------------|
-| GPU | 任意 (CPU BA) | 24 GB (3090/4090) |
-| RAM | 16 GB | 32 GB+ |
-| 磁盘 | 10 GB | 50 GB+ |
-
-当前本地环境 GPU 较弱，主要用于代码开发、CPU BA 和结果整理；3DGS 训练在远程 GPU 完成。
