@@ -128,6 +128,7 @@ def reconstruction_to_pycolmap(recon: Reconstruction,
             cam_from_world=cam_from_world,
         )
         reconstruction.add_image(img)
+        reconstruction.register_image(s + 1)
 
     # Add observations (Point2D and track elements)
     for obs_idx in range(recon.num_observations):

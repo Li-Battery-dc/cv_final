@@ -127,10 +127,16 @@ Main code:
 - [scripts/gs_train_official.sh](/home/dhr/cv_final/scripts/gs_train_official.sh)
 - [scripts/install_external_baselines.sh](/home/dhr/cv_final/scripts/install_external_baselines.sh)
 
-External sources in `packages/`:
+External sources:
 
-- `packages/gaussian-splatting`
+- `gaussian-splatting`
 - `packages/pycolmap`
+
+The wrapper keeps the project handoff format as `reconstruction.npz`. It uses
+the project environment to convert `Reconstruction` into a temporary
+COLMAP-style scene, then calls the official 3DGS repository with
+`OFFICIAL_PYTHON` from a separate environment, for example
+`$PROJECT_ROOT/.venv-3dgs/bin/python`.
 
 ## Metadata Files
 

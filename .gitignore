@@ -2,6 +2,8 @@
 .venv/
 /packages
 /record.md
+/gaussian-splatting
+/vggt-omega
 _pycache__/
 *.pyc
 *.pyo
