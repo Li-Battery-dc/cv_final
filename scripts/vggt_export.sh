@@ -14,7 +14,7 @@ OUTPUT_RUN_DIR="${OUTPUT_RUN_DIR:-}"
 STAGE="${STAGE:-all}" # tracks, vggt, or all
 VGGT_CACHE="${VGGT_CACHE:-}"
 
-MAX_QUERY_PTS="${MAX_QUERY_PTS:-512}"
+MAX_QUERY_PTS="${MAX_QUERY_PTS:-512}" # 非常影响显存，64帧基本上512满，32帧768满
 QUERY_FRAME_NUM="${QUERY_FRAME_NUM:-12}"
 VIS_THRESH="${VIS_THRESH:-0.1}"
 MAX_REPROJ_ERROR="${MAX_REPROJ_ERROR:-8.0}"
@@ -27,6 +27,7 @@ MASK_DIR="${MASK_DIR:-}"
 MASK_FOREGROUND_THRESHOLD="${MASK_FOREGROUND_THRESHOLD:-0.5}"
 MASK_MIN_OBSERVATIONS="${MASK_MIN_OBSERVATIONS:-2}"
 MASK_MIN_RATIO="${MASK_MIN_RATIO:-0.5}"
+INIT_POINTS_SOURCE="${INIT_POINTS_SOURCE:-depth}" # depth or point_head
 ENABLE_POINT_HEAD="${ENABLE_POINT_HEAD:-0}"
 SAVE_DENSE_FILTERED_RECONSTRUCTION="${SAVE_DENSE_FILTERED_RECONSTRUCTION:-0}"
 DENSE_FILTER_DISAGREEMENT_PERCENTILE="${DENSE_FILTER_DISAGREEMENT_PERCENTILE:-70}"
@@ -35,7 +36,7 @@ DENSE_FILTER_MIN_VOTES="${DENSE_FILTER_MIN_VOTES:-1}"
 
 source "$VENV_PATH/bin/activate"
 cd "$PROJECT_ROOT"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4}"
 export CUDA_VISIBLE_DEVICES
 
 if [[ "$STAGE" == "tracks" && -z "$VGGT_CACHE" ]]; then
@@ -58,6 +59,7 @@ echo "  Vis thresh:     $VIS_THRESH"
 echo "  Reproj error:   $MAX_REPROJ_ERROR"
 echo "  Min vis frames: $MIN_VISIBLE_FRAMES"
 echo "  Mask dir:       $MASK_DIR"
+echo "  Init points:    $INIT_POINTS_SOURCE"
 echo "  Point head:     $ENABLE_POINT_HEAD"
 echo "  Dense filtered: $SAVE_DENSE_FILTERED_RECONSTRUCTION"
 echo "============================================"
@@ -72,6 +74,7 @@ CMD=(python -m src.vggt_export
     --vis_thresh "$VIS_THRESH"
     --max_reproj_error "$MAX_REPROJ_ERROR"
     --min_visible_frames "$MIN_VISIBLE_FRAMES"
+    --init_points_source "$INIT_POINTS_SOURCE"
     --conf_thres_value 2.0
     --camera_type "$CAMERA_TYPE")
 

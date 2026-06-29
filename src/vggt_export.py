@@ -99,6 +99,9 @@ def parse_args():
                         help="Depth confidence threshold (used for dense point cloud)")
     parser.add_argument("--max_dense_points", type=int, default=100000,
                         help="Max dense points for .ply export")
+    parser.add_argument("--init_points_source", type=str, default="depth",
+                        choices=("depth", "point_head"),
+                        help="3D point source sampled by tracks for sparse Reconstruction/3DGS initialization")
     parser.add_argument("--enable_point_head", action="store_true", default=False,
                         help="Also run VGGT direct point-map head for geometry consistency checks")
     parser.add_argument("--save_dense_filtered_reconstruction", action="store_true", default=False,
@@ -291,6 +294,11 @@ def export_reconstruction_outputs(recon, original_coords_np, img_load_resolution
 def main():
     args = parse_args()
     set_seed(args.seed)
+    run_point_head = (
+        args.enable_point_head
+        or args.save_dense_filtered_reconstruction
+        or args.init_points_source == "point_head"
+    )
     stage_times = {}
     dense_count = None
     dense_filtered_count = None
@@ -326,14 +334,22 @@ def main():
     config_path = save_run_metadata(
         output_dir,
         stage="vggt_export",
-        params=vars(args),
+        params={
+            **vars(args),
+            "point_head_effective": run_point_head,
+            "sparse_init_points_source": args.init_points_source,
+        },
         inputs={
             "scene_dir": scene_dir,
             "image_dir": image_dir,
             "image_count": len(image_paths),
             "mask_dir": os.path.abspath(args.mask_dir) if args.mask_dir else None,
         },
-        outputs={"output_dir": output_dir, "vggt_cache": vggt_cache},
+        outputs={
+            "output_dir": output_dir,
+            "vggt_cache": vggt_cache,
+            "sparse_init_points_source": args.init_points_source,
+        },
     )
     print(f"Saved run config: {config_path}")
 
@@ -354,7 +370,7 @@ def main():
             images=images, dtype=dtype, device=device,
             vggt_resolution=args.vggt_resolution,
             return_frame_features=True,
-            return_point_map=args.enable_point_head or args.save_dense_filtered_reconstruction,
+            return_point_map=run_point_head,
         )
         del model
         gc.collect()
@@ -380,6 +396,8 @@ def main():
             print("=" * 60)
             print(f"  Images:           {S}")
             print(f"  Dense points:     {dense_count}")
+            print(f"  Point head:       {run_point_head}")
+            print(f"  Init point source: {args.init_points_source}")
             print(f"  VGGT cache:       {vggt_cache}")
             print(f"  Output PLY:       {ply_path}")
             print("=" * 60)
@@ -388,6 +406,8 @@ def main():
                 "timestamp_utc": utc_timestamp(),
                 "images": S,
                 "dense_points": dense_count,
+                "point_head_effective": run_point_head,
+                "sparse_init_points_source": args.init_points_source,
                 "vggt_cache": vggt_cache,
                 "output_ply": ply_path,
                 **stage_times,
@@ -426,15 +446,28 @@ def main():
                 "before requesting --save_dense_filtered_reconstruction."
             )
 
+    if args.init_points_source == "point_head":
+        if point_map is None:
+            raise ValueError(
+                "--init_points_source point_head requires a VGGT point_map. "
+                "Use --stage all/vggt, or use a cache created with --enable_point_head."
+            )
+        track_points_3d = point_map
+        track_conf = point_conf if point_conf is not None else depth_conf
+    else:
+        track_points_3d = points_3d_dense
+        track_conf = depth_conf
+
     # ---- Step 2: Track Prediction ----
+    print(f"Sparse initialization point source: {args.init_points_source}")
     print("Running track prediction...")
     t0 = time.time()
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
             pred_tracks, pred_vis, pred_confs, points_3d_track, points_rgb_track = predict_tracks(
                 images,
-                conf=depth_conf,
-                points_3d=points_3d_dense,
+                conf=track_conf,
+                points_3d=track_points_3d,
                 masks=None,
                 max_query_pts=args.max_query_pts,
                 query_frame_num=args.query_frame_num,
@@ -538,6 +571,9 @@ def main():
     recon.metadata['min_visible_frames'] = args.min_visible_frames
     recon.metadata['vggt_resolution'] = args.vggt_resolution
     recon.metadata['img_load_resolution'] = args.img_load_resolution
+    recon.metadata['sparse_init_points_source'] = args.init_points_source
+    recon.metadata['track_points_3d_source'] = args.init_points_source
+    recon.metadata['point_head_effective'] = run_point_head
     recon.metadata['original_coords'] = original_coords_np
     recon.metadata['vggt_cache'] = vggt_cache
     if frame_features is not None:
@@ -561,6 +597,7 @@ def main():
     print(f"  Images:           {S}")
     print(f"  Track points:     {recon.num_points}")
     print(f"  Observations:     {recon.num_observations}")
+    print(f"  Init point source: {args.init_points_source}")
     print(f"  VGGT cache:       {vggt_cache}")
     if dense_filtered_npz_path:
         print(f"  Dense filtered:   {dense_filtered_count} pts")
@@ -573,6 +610,8 @@ def main():
         "images": S,
         "track_points": recon.num_points,
         "observations": recon.num_observations,
+        "sparse_init_points_source": args.init_points_source,
+        "point_head_effective": run_point_head,
         "vggt_cache": vggt_cache,
         "output_npz": npz_path,
         "output_colmap": sparse_dir,
