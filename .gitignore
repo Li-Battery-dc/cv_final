@@ -4,6 +4,8 @@
 /record.md
 /gaussian-splatting
 /vggt-omega
+/outputs*
+/.outputs*
 _pycache__/
 *.pyc
 *.pyo

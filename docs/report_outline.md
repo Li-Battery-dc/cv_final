@@ -36,25 +36,29 @@
 
 ## 5. 自实现 Bundle Adjustment
 
-- 说明BA的基本定义和思路，在项目中的使用细节，包含数学定义:
-    - 说明优化变量：相机旋转、相机平移和 3D 点坐标。
-    - 说明固定项：当前实验固定 VGGT 内参，避免内参尺度漂移。
-    - 说明损失函数：Huber robust loss 下的多视角重投影误差。
-    - 说明两阶段流程：先全量优化，再剔除离群观测后继续优化。
-- BA运行后的初步结果：对3个场景的结果展示。
-    - 三个场景的基本结果
-    - 两阶段运行剔除的外点数
-    - 统计图展示BA的运行效果
+- 从大作业角度说明 BA 的作用：VGGT 是前馈初始化，BA 用多视角投影约束修正相机外参和三维点，使几何更一致。
+- 说明为什么自实现：展示优化变量、损失函数、稀疏结构和离群点处理，而不是只调用黑盒工具。
+- 说明固定项：固定 VGGT 内参，只优化外参和三维点，避免无标定输入下内参和尺度共同漂移。
+- 说明优化变量：每个自由相机使用 SO(3) 旋转向量和平移向量，每个三维点使用 xyz 坐标；固定前两个相机作为 gauge anchor。
+- 写清公式：
+    - `u_hat_k = pi(K_i, R_i X_j + t_i)`
+    - `r_k = u_hat_k - u_k`
+    - `min_theta sum_k rho_delta(||r_k(theta)||_2)`
+    - Huber loss 的分段定义。
+- 说明稀疏 Jacobian：每条观测只依赖一个相机和一个点，因此只产生 `2x6` 和 `2x3` 参数块。
+- 说明两阶段逻辑：第一轮全部观测 Huber BA；按第一轮重投影误差剔除离群观测；第二轮在过滤后观测图上继续优化。
+- BA运行结果表保留 placeholder，不展示优化耗时，只展示 RMSE/Median/P90 before-after 和移除外点数。
 
 ## 6. 3D GS
 
 
 ### 自实现 3DGS 与官方 3DGS
 
-- 说明3dgs的基本原理和自实现方式。
-- 说明自实现 3DGS 已能训练和导出 checkpoint，但效果明显弱于官方实现。
-- 写入自实现结果：custom BA + self 3DGS 在 `scene` 上得到的结果指标。render图展示自实现 3DGS 弱结果。
-- 说明失败原因候选：densification、尺度初始化、学习率调度和 renderer 参数仍不稳定。
+- 说明 3DGS 的基本形式化表达：高斯中心、协方差、透明度、方向相关颜色，alpha compositing 渲染公式。
+- 说明自实现方式：从 `Reconstruction` 点云初始化中心、邻域尺度、单位四元数、opacity、SH DC 颜色；用 `gsplat` 可微 rasterizer 和 L1+SSIM loss 训练；实现 densification/pruning 和 SH degree schedule。
+- 展示 self 3DGS 与 official 3DGS render comparison，占位。
+- 说明自实现 3DGS 已能训练和导出 checkpoint，但效果可能明显弱于官方实现。
+- 说明失败原因候选：densification/pruning/opacity reset、尺度初始化、学习率调度、renderer 参数、背景处理和颜色稳定性仍不成熟。
 - 说明最终报告策略：自实现 3DGS 展示工程实现和失败分析，受限于进一步的工程优化最终质量展示使用 official 3DGS。
 
 
@@ -62,21 +66,18 @@
 
 Human 场景修复实验
 
-- 基本流程：使用 mask 白底合成，按 mask 过滤初始化点。初期运行效果较差。后续提升了VGGSFM的tracks数量。
-- 说明关键发现：human 提升的主因是高密度 VGGSfM tracks，而不是 mask 本身。但是受限于硬件显存没办法进一步提升获得很好的结果。
-- 展示两个human场景下的运行结果数值和最终render出的结果对比。
-    - 写入 `1-human` 高密度 BA：`[PLACEHOLDER: no-filter rerun]`。
-    - 写入 `2-human` 高密度 BA：`[PLACEHOLDER: no-filter rerun]`。
-    - 写入 `1-human` final render：`[PLACEHOLDER: no-filter rerun]`。
-    - 写入 `2-human` final render：`[PLACEHOLDER: no-filter rerun]`。
+- 基本流程：使用 mask 白底合成，可选按 mask 过滤初始化点。
+- 简单说明 mask 对结果影响不大，tracks 密度可能更关键。
+- 展示两个 human 场景下的基本指标表和最终 render comparison，不保留 human metrics bar 图。
+- 增加 tracks 密度对比实验占位：low/high tracks 对 BA RMSE 和 3DGS 指标的影响。
 
 ### 3D GS不同效果对比 
 
-使用scene场景作为主实验，进行多种对比实验。说明具体实验设置。
-- VGGT raw原始导出和BA后的3D GS效果对比，展示参数对比，体现出BA对于3DGS的重要性。
-- 使用random init 的点云，对比VGGT raw 和BA后的3Dgs效果，即使不用点云初始化，BA 相机仍然能提升 3DGS。说明相机视角准确性才更重要，效果和使用tracker点初始化效果差别不大。
-
-展示主实验的metrics对比。展示 GT、raw render 和 BA render 的视觉对比。
+使用 `scene` 场景作为主实验。说明 `scene` 是办公室视频流输入，背景噪声、反光、遮挡和纹理变化更复杂，是难度最大的主实验。
+- 第一组：直接 VGGT raw sparse 初始化 vs BA sparse 初始化，说明 BA 对 3DGS 的作用。
+- 第二组：random point init 下 raw camera vs BA camera，分离相机质量和点云初始化质量的影响。
+- 不保留重复 metrics 图表，使用表格展示 metrics。
+- 补充 render 图占位符：比较 GT 和 BA 后 3DGS 的最终渲染效果；另可补 random-init render comparison。
 
 ## 7. VGGT 改进
 

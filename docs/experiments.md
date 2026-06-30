@@ -67,6 +67,18 @@ Human BA statistics:
 | `1-human` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | rerun |
 | `2-human` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | rerun |
 
+Human track-density ablation:
+
+Purpose: check whether human quality changes mainly come from denser tracks
+rather than mask compositing alone.
+
+| Scene | Density | MAX_QUERY_PTS | Query frames | Mask background | Mask points | BA RMSE after | PSNR | SSIM | LPIPS | Status |
+|---|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| `1-human` | low | 512 | 8 | white | optional | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | pending |
+| `1-human` | high | 1024 | 16 | white | optional | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | pending |
+| `2-human` | low | 512 | 8 | white | optional | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | pending |
+| `2-human` | high | 1024 | 16 | white | optional | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | pending |
+
 ### Scene 32 Negative Test
 
 This remains useful only if time permits. It should also be rerun with
@@ -190,14 +202,14 @@ CUDA_VISIBLE_DEVICES=<gpu> \
 RECONSTRUCTION=<SCENE_VGGT_RUN>/reconstruction.npz \
 IMAGE_DIR=/home/dhr/cv_final/data/scene/images \
 OUTPUT_ROOT=/home/dhr/cv_final/data/scene/gs_official_random_raw_nofilter \
-RANDOM_INIT=1 ITERATIONS=10000 RESOLUTION=768 SH_DEGREE=2 TEST_EVERY=8 \
+INIT_MODE=random ITERATIONS=10000 RESOLUTION=768 SH_DEGREE=2 TEST_EVERY=8 \
 bash scripts/gs_train_official.sh
 
 CUDA_VISIBLE_DEVICES=<gpu> \
 RECONSTRUCTION=<SCENE_BA_RUN>/reconstruction.npz \
 IMAGE_DIR=/home/dhr/cv_final/data/scene/images \
 OUTPUT_ROOT=/home/dhr/cv_final/data/scene/gs_official_random_ba_nofilter \
-RANDOM_INIT=1 ITERATIONS=10000 RESOLUTION=768 SH_DEGREE=2 TEST_EVERY=8 \
+INIT_MODE=random ITERATIONS=10000 RESOLUTION=768 SH_DEGREE=2 TEST_EVERY=8 \
 bash scripts/gs_train_official.sh
 ```
 
@@ -241,6 +253,56 @@ bash scripts/gs_train_official.sh
 
 If the masked-white image directory name differs, use the actual directory used
 by the human preprocessing step and record it in the run notes.
+
+Human track-density rerun template:
+
+```bash
+# Low-density example. Change scene to 1-human / 2-human.
+CUDA_VISIBLE_DEVICES=<gpu> \
+SCENE_DIR=/home/dhr/cv_final/data/<scene> \
+OUTPUT_ROOT=/home/dhr/cv_final/data/<scene>/vggt_raw_low_nofilter \
+STAGE=tracks \
+VGGT_CACHE=/home/dhr/cv_final/data/<scene>/vggt_raw/runs/<existing_vggt_cache_run>/vggt_predictions.npz \
+MAX_REPROJ_ERROR=0.0 \
+MAX_QUERY_PTS=512 \
+QUERY_FRAME_NUM=8 \
+VIS_THRESH=0.1 \
+MIN_VISIBLE_FRAMES=2 \
+IMAGE_RESOLUTION=448 \
+bash scripts/vggt_export.sh
+
+# High-density example.
+CUDA_VISIBLE_DEVICES=<gpu> \
+SCENE_DIR=/home/dhr/cv_final/data/<scene> \
+OUTPUT_ROOT=/home/dhr/cv_final/data/<scene>/vggt_raw_high_nofilter \
+STAGE=tracks \
+VGGT_CACHE=/home/dhr/cv_final/data/<scene>/vggt_raw/runs/<existing_vggt_cache_run>/vggt_predictions.npz \
+MAX_REPROJ_ERROR=0.0 \
+MAX_QUERY_PTS=1024 \
+QUERY_FRAME_NUM=16 \
+VIS_THRESH=0.1 \
+MIN_VISIBLE_FRAMES=2 \
+IMAGE_RESOLUTION=448 \
+bash scripts/vggt_export.sh
+```
+
+For each low/high VGGT run, continue with BA and official 3DGS:
+
+```bash
+# Change <density> to low / high, and use the printed run directory.
+CUDA_VISIBLE_DEVICES=<gpu> \
+INPUT_RECON=/home/dhr/cv_final/data/<scene>/vggt_raw_<density>_nofilter/runs/<vggt_run>/reconstruction.npz \
+OUTPUT_ROOT=/home/dhr/cv_final/data/<scene>/ba_custom_<density>_nofilter \
+MAX_NFEV=100 \
+bash scripts/ba_run.sh
+
+CUDA_VISIBLE_DEVICES=<gpu> \
+RECONSTRUCTION=/home/dhr/cv_final/data/<scene>/ba_custom_<density>_nofilter/runs/<ba_run>/reconstruction.npz \
+IMAGE_DIR=/home/dhr/cv_final/data/<scene>/images_masked_white \
+OUTPUT_ROOT=/home/dhr/cv_final/data/<scene>/gs_official_ba_<density>_masked_nofilter \
+ITERATIONS=10000 RESOLUTION=768 SH_DEGREE=2 TEST_EVERY=8 \
+bash scripts/gs_train_official.sh
+```
 
 ### 5. Optional Scene 32
 

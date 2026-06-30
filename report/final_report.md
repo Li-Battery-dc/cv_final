@@ -110,24 +110,60 @@ RMSE 对大误差更敏感，适合观察整体几何是否存在明显不一致
 
 ## 5. 自实现 Bundle Adjustment
 
-Bundle Adjustment 的目标是在多视角观测约束下优化相机外参和三维点，使投影误差最小。当前实现固定 VGGT 内参，优化相机旋转、相机平移和三维点坐标。固定内参可以避免在无标定输入下发生内参尺度漂移。
+Bundle Adjustment 是本项目中连接 VGGT 初始重建和 3DGS 训练的关键几何优化步骤。VGGT 可以在无标定输入下直接预测相机和三维点，但这些预测来自前馈网络和 tracker，不保证所有视角之间严格满足同一个几何模型。BA 的作用就是把 VGGT 给出的相机、三维点和二维 tracks 放到同一个投影模型中，联合调整相机外参和三维点，使多视角重投影误差尽可能小。
 
-对第 `i` 个相机和第 `j` 个三维点，投影残差为：
+本项目自实现 BA，而不是直接只调用 COLMAP/Ceres，主要是为了在报告中明确展示优化变量、损失函数和离群点处理过程。当前 BA 固定 VGGT 预测的相机内参 `K_i`，只优化相机外参和三维点。这样做有两个原因：第一，输入图像没有真实标定，内参、场景尺度和深度之间存在耦合，如果同时自由优化内参，容易出现尺度漂移；第二，本项目更关注 VGGT 初始相机外参和点云是否能通过多视角约束被修正，因此固定内参可以让实验目标更清晰。
 
-```text
-r_ij = project(K_i, R_i, t_i, X_j) - u_ij
-```
-
-优化目标为 Huber robust loss 下的加权重投影误差：
+设共有 `S` 个相机、`P` 个三维点和 `N` 条二维观测。第 `i` 个相机的外参为 OpenCV camera-from-world 形式：
 
 ```text
-min_{R_i,t_i,X_j} sum_{(i,j) in O} rho(||r_ij||_2)
+X_cam = R_i X_world + t_i
 ```
 
-实现流程为两阶段：
+旋转 `R_i` 使用 SO(3) 旋转向量 `omega_i` 参数化，平移为 `t_i`。对第 `j` 个三维点 `X_j`，第 `k` 条观测连接相机 `i(k)` 和点 `j(k)`，其预测投影为：
 
-1. 使用全部观测进行鲁棒 BA。
-2. 根据重投影误差剔除离群观测，再进行第二轮优化。
+```text
+u_hat_k = pi(K_i, R_i X_j + t_i)
+```
+
+其中 `pi(.)` 是第 3 节定义的针孔投影。二维残差为：
+
+```text
+r_k = u_hat_k - u_k
+    = (dx_k, dy_k)^T
+```
+
+最终优化变量可以写成：
+
+```text
+theta = {omega_i, t_i}_{i not fixed} union {X_j}_{j=1..P}
+```
+
+由于纯重建问题存在 gauge freedom，即整体坐标系可以发生全局旋转、平移和尺度变化而不改变重投影形式，本实现固定前两个相机作为 gauge anchor。固定相机并不表示这两个相机一定完全正确，而是给优化问题一个稳定坐标参考，避免所有相机和点云一起漂移。
+
+BA 的目标函数为鲁棒重投影误差：
+
+```text
+min_theta  sum_{k=1..N} rho_delta(||r_k(theta)||_2)
+```
+
+这里 `rho_delta` 使用 Huber loss。Huber loss 在误差较小时接近平方损失，能够精细优化正常观测；在误差较大时近似线性增长，降低错误 tracks、遮挡点和不稳定匹配对优化方向的破坏。其形式可以写为：
+
+```text
+rho_delta(e) =
+  0.5 e^2,                  if |e| <= delta
+  delta (|e| - 0.5 delta),  otherwise
+```
+
+其中本实验默认 `delta = 1.0 px`。优化时将每条二维观测拆成 `dx, dy` 两个残差项，使用 trust-region least squares 求解。由于每条观测只依赖一个相机和一个三维点，Jacobian 是高度稀疏的：一条观测只会产生相机参数的 `2 x 6` 块和三维点参数的 `2 x 3` 块。因此实现中显式构造稀疏 Jacobian pattern，让求解器只在必要的参数块上计算和更新，从而适应上万点、十万级观测的规模。
+
+完整 BA 流程分为两轮：
+
+1. 第一轮使用所有 VGGT tracker 观测进行 Huber BA。此时不依赖 VGGT export 的重投影预过滤，目的是让 BA 直接面对更原始的观测图。
+2. 第一轮结束后，计算每条观测的重投影误差。如果误差超过阈值，则认为它更可能来自错误 track、遮挡或几何不一致，把它从观测图中移除。
+3. 第二轮在过滤后的观测图上重新运行 Huber BA，得到最终相机和三维点。
+
+这个两阶段设计的意义在于把“鲁棒优化”和“显式离群点剔除”结合起来。第一轮 Huber loss 可以避免少量坏点直接拉偏整体解；第二轮则在几何结构已经初步修正后，用更干净的观测图进一步收敛。最终报告中的 `RMSE before` 表示进入 BA 前 VGGT raw reconstruction 的重投影误差，`RMSE after` 表示第二轮 BA 后的重投影误差，`移除外点` 表示第一轮后被剔除的观测数量。
 
 BA 定量结果如下：
 
@@ -148,62 +184,103 @@ BA 定量结果如下：
 
 ### 6.1 自实现 3DGS 与 official 3DGS
 
-项目实现了自定义 Gaussian model、renderer wrapper、trainer 和 viewer。自实现版本能够从 `Reconstruction` 初始化高斯，训练并导出 checkpoint，但当前效果弱于 official 3DGS。主要原因可能包括 densification 策略、尺度初始化、学习率调度和 renderer 参数仍未达到成熟实现的稳定性。
+3D Gaussian Splatting 使用一组可训练的三维高斯来表示场景。每个高斯不是一个离散点，而是一个带空间范围、透明度和颜色的椭球。第 `m` 个高斯可以写成：
 
-在 `scene` 上，自实现 3DGS 使用 BA 后 reconstruction 的最终结果为：
+```text
+G_m = {mu_m, Sigma_m, alpha_m, c_m(d)}
+```
 
-| 方法 | PSNR | SSIM | LPIPS | Gaussian 数 | 训练时间 |
-|---|---:|---:|---:|---:|---:|
-| custom 3DGS + custom BA | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
+其中 `mu_m` 是三维中心，`Sigma_m` 是三维协方差，`alpha_m` 是不透明度，`c_m(d)` 是与观察方向 `d` 相关的颜色。协方差通常由尺度和旋转构成：
 
-因此最终质量展示主要使用 official 3DGS；自实现 3DGS 用于展示工程链路和失败分析。
+```text
+Sigma_m = R_m diag(s_m^2) R_m^T
+```
+
+渲染时，高斯会被投影到图像平面形成二维 footprint。对某个像素，按照深度顺序对覆盖该像素的高斯做 alpha compositing：
+
+```text
+C = sum_m T_m alpha_m c_m(d)
+T_m = product_{l < m} (1 - alpha_l)
+```
+
+训练目标是让渲染图像接近真实图像。本项目和常见 3DGS 实现一样，使用图像重建损失：
+
+```text
+L = lambda L1(I_render, I_gt) + (1 - lambda)(1 - SSIM(I_render, I_gt))
+```
+
+自实现 3DGS 按照上述基本表达构建。初始化阶段从 `Reconstruction` 读取三维点作为高斯中心 `mu`，使用点云邻域距离估计初始尺度 `s`，旋转初始化为单位四元数，不透明度初始化为较小常数，点云 RGB 作为 spherical harmonics 的 DC 颜色项。训练阶段使用 `gsplat` rasterizer 完成可微渲染，并用 Adam 分别优化位置、尺度、旋转、不透明度和 SH 颜色系数。为了让模型容量随训练增长，实现中还加入了 densification / pruning 逻辑：根据梯度和尺度启发式复制、分裂或删除高斯，同时逐步提升 SH degree。
+
+同时，项目也提供 official 3DGS wrapper。它将 `Reconstruction` 转换成 COLMAP sparse 格式，再调用成熟的 official Gaussian Splatting 训练、渲染和评估流程。自实现版本用于展示我对 3DGS 表示和训练流程的实现；official 版本用于最终视觉质量展示和指标对比。
+
+自实现 3DGS 与 official 3DGS 的结果对比如下：
+
+| 方法 | 输入重建 | PSNR | SSIM | LPIPS | Gaussian 数 | 说明 |
+|---|---|---:|---:|---:|---:|---|
+| self 3DGS | custom BA | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | 自实现训练流程 |
+| official 3DGS | custom BA | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | 最终展示流程 |
+
+```text
+[PLACEHOLDER: self 3DGS vs official 3DGS render comparison]
+```
+
+当前预期自实现效果会明显弱于 official 3DGS。可能原因包括：第一，official 3DGS 的 densification、pruning 和 opacity reset 策略经过大量工程调参，而当前实现只保留了相对简化的复制、分裂和删除规则；第二，高斯尺度初始化对收敛非常敏感，点云稀疏或局部尺度估计不准会造成高斯过大、过小或透明度难以优化；第三，位置、尺度、旋转、不透明度和 SH 系数需要不同学习率和调度，当前实现的学习率策略仍较粗；第四，official 实现包含更完整的训练细节，例如更成熟的 rasterization 参数、背景处理、曝光/颜色稳定性和训练日志流程。因此报告中将 self 3DGS 作为“实现链路和失败分析”，把 official 3DGS 作为最终渲染质量展示。
 
 ### 6.2 Human 场景结果
 
-Human 场景的初期效果较差，主要原因是前景人物占图像比例小、绿色背景对指标和初始化点都有影响。后续采用 mask-white 合成，并提升 VGGT/VGGSfM tracks 密度。实验发现，human 结果提升的主要因素是高密度 tracks 和稳定 BA，而不是 mask 本身。
+Human 场景用于展示大作业要求中的人物重建结果。由于人物前景面积较小，背景颜色相对单一，直接训练时背景容易主导指标。实验中使用了 mask 将背景合成为白色，并可选择按 mask 过滤初始化点。当前观察是 mask 对最终结果的影响不如 tracks 密度明显：更密集、更稳定的 VGGT/VGGSfM tracks 往往对 BA 和后续 3DGS 更关键。因此本节只展示最终基本结果，mask 作为预处理设置简单说明。
 
-Human 场景 BA 结果：
+Human 场景 BA 和 3DGS 基本结果如下：
 
-| 场景 | BA 点数 | 观测数 | RMSE before | RMSE after | P90 before | P90 after |
-|---|---:|---:|---:|---:|---:|---:|
-| `1-human` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
-| `2-human` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
+| 场景 | Tracks 设置 | BA RMSE before | BA RMSE after | PSNR | SSIM | LPIPS | Run |
+|---|---|---:|---:|---:|---:|---:|---|
+| `1-human` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
+| `2-human` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
 
-Human 场景 official 3DGS 结果：
+后续需要补充一个 tracks 密度对比实验，用来区分 mask 和 tracks 数量的影响：
 
-| 场景 | Test views | PSNR | SSIM | LPIPS | Run |
-|---|---:|---:|---:|---:|---|
-| `1-human` | 8 | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
-| `2-human` | 8 | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
-
-```text
-[PLACEHOLDER: 重新生成 Human metrics]
-```
+| 场景 | Tracks 密度 | MAX_QUERY_PTS | Query frames | BA RMSE after | 3DGS PSNR | 状态 |
+|---|---|---:|---:|---:|---:|---|
+| `1-human` | low | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | pending |
+| `1-human` | high | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | pending |
+| `2-human` | low | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | pending |
+| `2-human` | high | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | pending |
 
 ```text
-[PLACEHOLDER: 重新生成 Human render comparison]
+[PLACEHOLDER: Human render comparison]
 ```
 
-### 6.3 Scene 主实验：raw、BA 与 random init
+### 6.3 Scene 主实验：办公室视频流
 
-主实验使用 `scene` 场景。对比项包括 VGGT raw sparse 初始化、custom BA sparse 初始化，以及 random point init 下 raw camera 和 BA camera 的效果。random init 对比用于区分“点云初始化质量”和“相机质量”的贡献。
+主实验使用 `scene` 场景。该数据来自办公室视频流抽帧，包含桌面、显示器、墙面、反光区域和较复杂背景。相比 human 数据，`scene` 的纹理、遮挡、背景噪声和视角覆盖更复杂，因此更适合作为评价 BA 和 3DGS 质量的主实验。
+
+#### 6.3.1 Sparse 初始化：VGGT raw vs custom BA
+
+第一组对比使用相同的 tracker point 初始化，只改变相机和点云是否经过 custom BA。这个实验直接回答大作业中“BA 是否改善 Gaussian Splatting 结果”的问题。如果 BA 后的重投影误差下降，同时 3DGS 的 PSNR/SSIM/LPIPS 和视觉效果提升，就说明几何一致性提升确实传递到了可微渲染训练中。
 
 | 方法 | 初始化点 | 相机 | PSNR | SSIM | LPIPS | Run |
 |---|---|---|---:|---:|---:|---|
 | VGGT raw | tracker points | VGGT raw | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
 | custom BA | tracker points | custom BA | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
+
+```text
+[PLACEHOLDER: Scene GT vs BA 3DGS final render comparison]
+```
+
+#### 6.3.2 Random 初始化：raw camera vs BA camera
+
+第二组对比使用 random point initialization，尽量弱化“初始点云质量”的影响，只比较 raw camera 和 BA camera。这个实验用于判断 BA 的收益是否主要来自更好的相机外参。如果在 random init 下 BA camera 仍然优于 raw camera，就说明相机几何本身是 3DGS 训练质量的重要因素，而不是只靠更好的 tracker points 初始化。
+
+| 方法 | 初始化点 | 相机 | PSNR | SSIM | LPIPS | Run |
+|---|---|---|---:|---:|---:|---|
 | random raw | random points | VGGT raw | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
 | random BA | random points | custom BA | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` | `[PLACEHOLDER]` |
 
 ```text
-[PLACEHOLDER: 重新生成 Scene core 3DGS metrics]
+[PLACEHOLDER: Scene random-init raw-camera vs BA-camera render comparison]
 ```
 
-```text
-[PLACEHOLDER: 重新生成 Scene render comparison]
-```
-
-待重跑后，需要分别比较 tracker point 初始化和 random point init 下 BA camera 的收益，从而判断相机外参质量和点云初始化质量各自的贡献。
+待重跑后，本节需要分别分析两类实验：第一类说明 BA reconstruction 作为 sparse 初始化是否提升最终渲染；第二类说明在随机点初始化下，BA camera 是否仍能单独带来收益。
 
 ## 7. VGGT 改进
 
