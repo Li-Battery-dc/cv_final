@@ -1,0 +1,2 @@
+run_id,scene,method,psnr,ssim,lpips,final_n_gaussians,training_time_seconds,run_dir
+scene_custom_gs_ba,scene,custom renderer baseline,16.399215005910307,0.5697032138705254,,100619,126.17805910110474,/home/dhr/cv_final/data/scene/gs_custom_ba

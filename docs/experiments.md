@@ -1,184 +1,286 @@
-# Experiment Plan
+# Experiment Plan and Run Audit
 
-## Baseline Results
+This document is the source of truth for final-report experiments. Use explicit
+run directories only. Do not rely on `latest` symlinks; the current scripts print
+the created run directory and record it in `run_config.json`.
+
+## Current Usable Results
 
 Baseline scene: `data/scene/images`, 64 frames uniformly sampled from
-`data/raw/3_scene.mp4`. Unless otherwise stated, validation uses every 8th
-frame as held-out view.
+`data/raw/3_scene.mp4`. Validation uses every 8th frame as held-out view.
 
-| ID | Reconstruction | Renderer / Trainer | PSNR | SSIM | LPIPS | Notes |
-|---|---|---|---:|---:|---:|---|
-| A | VGGT raw | official 3DGS | 20.729 | 0.754 | 0.247 | no BA |
-| B | custom BA | official 3DGS | 22.471 | 0.820 | 0.197 | main BA baseline |
-| C | VGGT raw | official 3DGS random init | 20.317 | 0.742 | 0.264 | no geometry init |
-| D | custom BA | official 3DGS random init | 21.983 | 0.806 | 0.215 | camera benefit without point init |
-| E | custom BA | custom 3DGS | 16.399 | 0.570 | - | self renderer baseline |
+| ID | Reconstruction | Renderer / Trainer | Run | PSNR | SSIM | LPIPS | Status |
+|---|---|---|---|---:|---:|---:|---|
+| A | VGGT raw | official 3DGS | `data/scene/gs_official_raw/runs/20260627_135803_gaussian_official` | 20.729 | 0.754 | 0.247 | usable |
+| B | custom BA | official 3DGS | `data/scene/gs_official_ba/runs/20260627_133737_gaussian_official` | 22.471 | 0.820 | 0.197 | main baseline |
+| C | VGGT raw | official 3DGS random init | `data/scene/gs_official_random_raw/runs/20260627_141252_gaussian_official` | 20.317 | 0.742 | 0.264 | usable |
+| D | custom BA | official 3DGS random init | `data/scene/gs_official_random_ba/runs/20260627_140637_gaussian_official` | 21.983 | 0.806 | 0.215 | usable |
+| E | custom BA | custom 3DGS | `data/scene/gs_custom_ba` | 16.399 | 0.570 | - | engineering baseline |
 
 BA effect on the same 64-frame scene:
 
-| Stage | Images | Points | Observations | RMSE px | Median px | P90 px | Runtime |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| VGGT raw | 64 | 9,760 | 116,725 | 3.816 | 2.801 | 6.423 | VGGT 19.7s + track 34.1s |
-| custom BA | 64 | 9,679 | 112,366 | 1.577 | 0.792 | 2.788 | 122.1s |
+| Stage | Run | Images | Points | Observations | RMSE px | Median px | P90 px | Runtime |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| VGGT raw | `data/scene/vggt_raw/runs/20260627_074913_vggt_export` | 64 | 9,760 | 116,725 | 3.816 | 2.801 | 6.423 | VGGT 19.7s + track 34.1s |
+| custom BA | `data/scene/ba_custom/runs/20260627_075839_ba_custom` | 64 | 9,679 | 112,366 | 1.577 | 0.792 | 2.788 | 122.1s |
+| PyCOLMAP BA | `data/scene/ba_pycolmap/runs/20260627_080613_ba_pycolmap` | 64 | 9,654 | 112,404 | 1.266 | 0.534 | 2.072 | see summary |
 
-## Improvement Experiments
+Human report results:
 
-The improvement branch uses `data/raw/3_scene.mp4` as input and writes selected
-frames to `data/scene_selected/images`.
+| Scene | Reconstruction / Renderer | Run | PSNR | SSIM | LPIPS | Notes |
+|---|---|---|---:|---:|---:|---|
+| `1-human` | HQ custom BA + official 3DGS + mask-white | `data/1-human/gs_official_ba_hq_masked/runs/20260629_084243_gaussian_official` | 26.435 | 0.959 | 0.031 | 8 test views |
+| `2-human` | HQ custom BA + official 3DGS + mask-white | `data/2-human/gs_official_ba_hq_masked/runs/20260629_085004_gaussian_official` | 28.624 | 0.968 | 0.024 | 8 test views |
+
+Useful negative / support result:
+
+| Scene | Method | Run | PSNR | SSIM | LPIPS | Interpretation |
+|---|---|---|---:|---:|---:|---|
+| `scene_32` | raw HQ | `data/scene_32/gs_official_raw_hq_768/runs/20260629_092440_gaussian_official` | 18.233 | 0.678 | 0.317 | fewer frames hurt coverage |
+| `scene_32` | BA HQ | `data/scene_32/gs_official_ba_hq_768/runs/20260629_092117_gaussian_official` | 19.740 | 0.750 | 0.265 | BA still helps |
+
+## Current Gaps and Invalid Runs
+
+- `data/scene_selected/vggt_improved/runs/20260629_125715_vggt_export` is incomplete for sparse-track final claims: it has `vggt_predictions.npz` and `points3d_dense.ply`, but no `reconstruction.npz` or `summary.json`. It is still valid as the cached VGGT prediction source for dense ablation export because it contains depth, cameras, and point-map predictions.
+- That same selected run used `init_points_source=point_head`, which conflicts with the final sparse method definition. Final selected-frame sparse tracks must use `INIT_POINTS_SOURCE=depth`; point head is only a consistency checker for dense filtering.
+- `data/scene_selected/vggt_improved_depth_q256/runs/20260629_150641_vggt_export` is a debug artifact only. It lowered `MAX_QUERY_PTS` to 256 and should not be used for final comparison against the uniform baseline.
+- The 512-query selected sparse retry `data/scene_selected/vggt_improved_depth_retry512/runs/20260629_151605_vggt_export` matched the uniform baseline tracking parameters (`img_load_resolution=448`, `max_query_pts=512`, `query_frame_num=12`, `fine_tracking=true`, `vis_thresh=0.1`, `max_reproj_error=8.0`, `min_visible_frames=2`) but failed during fine tracking with CUDA OOM. At failure time GPU 6 had a separate resident process using about 6.91 GiB, leaving the run with insufficient headroom. This is a hardware availability blocker, not evidence that the selected-frame method requires lower query count.
+- Full sparse selected-frame claims are not report-ready until the 512-query track export, selected BA, and selected sparse official 3DGS runs complete on a GPU with enough free memory.
+
+## Improvement Experiment Matrix
+
+The final improvement branch uses:
 
 ```text
 data/raw/3_scene.mp4
-  -> python -m src.improvement.video_select
+  -> src.improvement.video_select
   -> data/scene_selected/images
-  -> python -m src.vggt_export --enable_point_head --save_dense_filtered_reconstruction
-  -> sparse track reconstruction for BA
-  -> dense filtered reconstruction for 3DGS initialization
+  -> src.vggt_export with depth sparse tracks + point_head cache
+  -> dense ablation Reconstructions
+  -> custom BA on selected sparse tracks
+  -> official 3DGS metrics and render sheets
 ```
 
 ### I1: Video Frame Selection
 
-Purpose: test whether training-free frame selection improves VGGT camera and
-track quality compared with uniform 64-frame sampling.
+Purpose: test whether training-free frame selection improves VGGT/BA geometry
+and downstream rendering against uniform 64-frame sampling.
 
-| Method | Input frames | Candidate frames | Final frames | VGGT points | Observations | RMSE px | P90 px | 3DGS PSNR | 3DGS SSIM | Status |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Uniform baseline | existing `data/scene/images` | - | 64 | 9,760 | 116,725 | 3.816 | 6.423 | 20.729 | 0.754 | done |
-| Quality + VGGT selected | `data/raw/3_scene.mp4` | 192 | 64 | TBD | TBD | TBD | TBD | TBD | TBD | pending |
+| Method | Input | Candidate frames | Final frames | VGGT points | Observations | Raw RMSE | BA RMSE | 3DGS PSNR | Status |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Uniform baseline | `data/scene/images` | - | 64 | 9,760 | 116,725 | 3.816 | 1.577 | 20.729 raw / 22.471 BA | done |
+| Selected final | `data/raw/3_scene.mp4` | 192 preferred, 128 fallback | 64 | blocked | blocked | blocked | blocked | see dense results | sparse 512 run OOM on current GPU 6 availability |
 
-Primary artifacts after running:
+Frame selection diagnostics to record:
 
-- `data/scene_selected/frame_selection_candidates.json`
-- `data/scene_selected/frame_selection_summary.json`
-- `data/scene_selected/images/*.jpg`
-- `data/scene_selected/vggt_improved/.../reconstruction.npz`
+| Metric | Source |
+|---|---|
+| decoded frames, FPS, candidate count, final count | `frame_selection_summary.json` |
+| selected reliability mean vs candidate mean | `reliability_stats` |
+| centrality mean/min/max | `reliability_stats` |
+| pose jump mean/P90 and gap edges | `reliability_stats` |
+| selected frame indices/timestamps | `final_frames` |
 
-Record these frame-selection diagnostics:
+### I2: Dense Geometry Ablation
 
-| Metric | Value |
-|---|---:|
-| decoded video frames | TBD |
-| candidate frames | 192 |
-| final frames | 64 |
-| mean selected centrality | TBD |
-| mean candidate centrality | TBD |
-| pose jump P90 before selection | TBD |
-| pose jump P90 after selection | TBD |
+Purpose: evaluate whether depth/camera dense points and consistency filtering
+provide better 3DGS initialization than sparse tracks or direct point maps.
 
-### I2: Dense Geometry Initialization and Filtering
+All dense variants are exported as `Reconstruction` `.npz` files with empty
+observation graphs and can be passed directly to official 3DGS.
 
-Purpose: compare VGGT sparse tracks, depth-camera dense points, point-map dense
-points, and filtered depth-camera dense points for 3DGS initialization.
+| Variant | Point source | Filtering | Expected output | 3DGS PSNR | SSIM | LPIPS | Status |
+|---|---|---|---|---:|---:|---:|---|
+| sparse track baseline | VGGT tracker points | visibility + reprojection | selected sparse `reconstruction.npz` | TBD | TBD | TBD | blocked by 512-query tracking OOM |
+| `depth_only` | depth + camera unprojection | none | `reconstruction_dense_depth_only.npz` | 24.834 | 0.859 | 0.141 | done |
+| `pointmap_only` | VGGT direct point map | none | `reconstruction_dense_pointmap_only.npz` | 24.914 | 0.859 | 0.141 | done |
+| `disagreement_only` | depth + camera | point-map disagreement | `reconstruction_dense_disagreement_only.npz` | 24.953 | 0.860 | 0.139 | best dense result |
+| `reprojection_only` | depth + camera | neighbor depth reprojection | `reconstruction_dense_reprojection_only.npz` | 24.920 | 0.860 | 0.141 | done |
+| `filtered_full` | depth + camera | disagreement + reprojection voting | `reconstruction_dense_filtered_full.npz` and legacy `reconstruction_dense_filtered.npz` | 24.903 | 0.860 | 0.141 | done |
 
-| Method | Main point source | Filtering | Points before sampling | Init points | 3DGS PSNR | 3DGS SSIM | LPIPS | Notes | Status |
-|---|---|---|---:|---:|---:|---:|---:|---|---|
-| Sparse track baseline | VGGT tracks | reprojection filtering | 9,760 | 9,760 | 20.729 | 0.754 | 0.247 | original sparse baseline | done |
-| Depth only | depth + camera | none | TBD | 200k max | TBD | TBD | TBD | tests depth-camera representation | pending |
-| Point map only | point map | none | TBD | 200k max | TBD | TBD | TBD | tests direct point-map quality | pending |
-| Depth filtered | depth + camera | depth-point disagreement + reprojection voting | TBD | 200k max | TBD | TBD | TBD | tests consistency filtering benefit | pending |
+Dense export run:
 
-Primary geometry-filter artifacts:
+```text
+data/scene_selected/vggt_dense_ablation_200k/runs/20260629_152009_vggt_export
+```
 
-- `reconstruction_dense_filtered.npz`
-- `points3d_dense_filtered.ply`
-- `geometry_filter_stats.json`
+Official 3DGS dense runs:
 
-Record these filtering diagnostics:
+| Variant | Run |
+|---|---|
+| `depth_only` | `data/scene_selected/gs_official_dense_depth_only/runs/20260629_152539_gaussian_official` |
+| `pointmap_only` | `data/scene_selected/gs_official_dense_pointmap_only/runs/20260629_152909_gaussian_official` |
+| `disagreement_only` | `data/scene_selected/gs_official_dense_disagreement_only/runs/20260629_153239_gaussian_official` |
+| `reprojection_only` | `data/scene_selected/gs_official_dense_reprojection_only/runs/20260629_153608_gaussian_official` |
+| `filtered_full` | `data/scene_selected/gs_official_dense_filtered_full/runs/20260629_152158_gaussian_official` |
 
-| Metric | Value |
-|---|---:|
-| total dense pixels | TBD |
-| finite depth points | TBD |
-| after depth-point disagreement | TBD |
-| after reprojection voting | TBD |
-| sampled output points | 200,000 max |
-| disagreement percentile | 70 |
-| reprojection percentile | 70 |
-| min neighbor votes | 1 |
+Geometry diagnostics to record from `geometry_filter_*_stats.json`:
 
-Current implementation note:
+| Metric | Meaning |
+|---|---|
+| `total_pixels` | all dense pixels across selected frames |
+| `finite_points` | valid finite dense points before filtering |
+| `after_disagreement` | retained by point-map consistency |
+| `after_reprojection` | retained by final keep rule |
+| `output_points` | sampled output points, capped by `MAX_DENSE_POINTS` |
+| `disagreement_threshold`, `reproj_threshold` | adaptive thresholds |
+| `points_with_valid_neighbors`, `mean_reproj_votes_kept` | multi-view support |
 
-- `filtered dense` is already exported as a ready-to-train dense reconstruction.
-- `pointmap-only init` does not yet have a standalone dense reconstruction export command.
-- `depth-only dense init` does not yet have a standalone dense reconstruction export command.
+Current dense geometry statistics from
+`report/metrics/geometry_filter_metrics.csv`:
+
+| Variant | Finite points | After disagreement | After reprojection | Output points | Mean kept votes |
+|---|---:|---:|---:|---:|---:|
+| `depth_only` | 17,172,736 | 17,172,736 | 17,172,736 | 200,000 | 0.000 |
+| `pointmap_only` | 17,172,736 | 17,172,736 | 17,172,736 | 200,000 | 0.000 |
+| `disagreement_only` | 17,172,736 | 12,020,915 | 12,020,915 | 200,000 | 0.000 |
+| `reprojection_only` | 17,172,736 | 17,172,736 | 14,513,982 | 200,000 | 3.087 |
+| `filtered_full` | 17,172,736 | 12,020,915 | 11,068,970 | 200,000 | 3.235 |
 
 ### I3: Full Method
 
-Purpose: evaluate the final method that combines both improvements:
+Purpose: compare the final combined method against the uniform raw/BA baselines.
 
-1. video frame selection from 192 candidates to 64 selected frames;
-2. final VGGT rerun on selected frames;
-3. depth-camera point construction;
-4. point-map disagreement filtering;
-5. neighbor-view reprojection voting;
-6. 3DGS initialization from filtered dense points.
-
-| Method | Frames | Cameras | Init point source | BA | 3DGS PSNR | SSIM | LPIPS | Status |
+| Method | Frames | Cameras | Init points | BA | PSNR | SSIM | LPIPS | Status |
 |---|---:|---|---|---|---:|---:|---:|---|
-| Uniform + raw track | 64 | VGGT raw | sparse tracks | no | 20.729 | 0.754 | 0.247 | done |
-| Uniform + BA | 64 | custom BA | sparse tracks | yes | 22.471 | 0.820 | 0.197 | done |
-| Selected + raw track | 64 | VGGT selected | sparse tracks | no | TBD | TBD | TBD | pending |
-| Selected + BA | 64 | custom BA | sparse tracks | yes | TBD | TBD | TBD | pending |
-| Selected + filtered dense | 64 | VGGT selected or BA | filtered depth dense | optional | TBD | TBD | TBD | pending |
+| Uniform + raw sparse | 64 | VGGT raw | sparse tracks | no | 20.729 | 0.754 | 0.247 | done |
+| Uniform + BA sparse | 64 | custom BA | sparse tracks | yes | 22.471 | 0.820 | 0.197 | done |
+| Selected + raw sparse | 64 | selected VGGT | sparse tracks | no | TBD | TBD | TBD | blocked by 512-query tracking OOM |
+| Selected + BA sparse | 64 | selected custom BA | sparse tracks | yes | TBD | TBD | TBD | blocked by selected sparse export |
+| Selected + filtered dense | 64 | selected VGGT | filtered dense depth | no | 24.903 | 0.860 | 0.141 | done |
+| Selected + filtered dense + BA cameras | 64 | selected custom BA cameras | filtered dense depth | yes | TBD | TBD | TBD | optional if code path is available |
 
 ## Commands
 
 Frame selection:
 
 ```bash
-.venv/bin/python -m src.improvement.video_select \
-  --video data/raw/3_scene.mp4 \
-  --output_scene_dir data/scene_selected \
-  --candidate_count 192 \
-  --final_count 64 \
-  --overwrite
+CUDA_VISIBLE_DEVICES=0 OVERWRITE=1 CANDIDATE_COUNT=192 FINAL_COUNT=64 \
+bash scripts/video_select.sh
 ```
 
-Final VGGT export with point-map cache and dense geometry filtering:
+If the scout VGGT pass cannot fit in memory, rerun with `CANDIDATE_COUNT=128`
+and record that as a hardware fallback.
+
+Final selected VGGT export with depth sparse tracks and all dense ablations.
+Keep these tracking parameters aligned with the uniform baseline; do not lower
+`MAX_QUERY_PTS` for final claims:
 
 ```bash
-INIT_POINTS_SOURCE=depth ENABLE_POINT_HEAD=1 SAVE_DENSE_FILTERED_RECONSTRUCTION=1 \
+CUDA_VISIBLE_DEVICES=6 \
 SCENE_DIR=/home/dhr/cv_final/data/scene_selected \
-OUTPUT_ROOT=/home/dhr/cv_final/data/scene_selected/vggt_improved \
+OUTPUT_ROOT=/home/dhr/cv_final/data/scene_selected/vggt_improved_depth \
+INIT_POINTS_SOURCE=depth \
+ENABLE_POINT_HEAD=1 \
+DENSE_RECONSTRUCTION_VARIANTS=depth_only,pointmap_only,disagreement_only,reprojection_only,filtered_full \
+MAX_QUERY_PTS=512 \
+IMAGE_RESOLUTION=448 \
+MAX_DENSE_POINTS=200000 \
 bash scripts/vggt_export.sh
 ```
 
-This keeps sparse reconstruction and BA on the `depth`-initialized VGGSfM track
-path, while enabling `point_head` only for consistency checking and dense 3DGS
-initialization.
-
-BA on selected-frame sparse reconstruction:
+If `vggt_predictions.npz` is already valid and contains `point_map`, reuse it
+for tracks/export only:
 
 ```bash
-.venv/bin/python -m src.ba.run \
-  --input data/scene_selected/vggt_improved/runs/<run>/reconstruction.npz \
-  --output data/scene_selected/ba_custom
+CUDA_VISIBLE_DEVICES=6 \
+SCENE_DIR=/home/dhr/cv_final/data/scene_selected \
+OUTPUT_ROOT=/home/dhr/cv_final/data/scene_selected/vggt_improved_depth \
+STAGE=tracks \
+VGGT_CACHE=/home/dhr/cv_final/data/scene_selected/vggt_improved_depth/runs/<run>/vggt_predictions.npz \
+INIT_POINTS_SOURCE=depth \
+ENABLE_POINT_HEAD=1 \
+DENSE_RECONSTRUCTION_VARIANTS=depth_only,pointmap_only,disagreement_only,reprojection_only,filtered_full \
+MAX_QUERY_PTS=512 \
+IMAGE_RESOLUTION=448 \
+MAX_DENSE_POINTS=200000 \
+bash scripts/vggt_export.sh
 ```
 
-3DGS from filtered dense reconstruction:
+Dense-only ablation export from an existing VGGT cache. This is the completed
+run used for the dense results above:
 
 ```bash
-.venv/bin/python -m src.gaussian.train \
-  --reconstruction data/scene_selected/vggt_improved/runs/<run>/reconstruction_dense_filtered.npz \
-  --image_dir data/scene_selected/images \
-  --output data/scene_selected/gs_filtered_dense \
-  --max_init_gaussians 200000
+CUDA_VISIBLE_DEVICES=6 \
+SCENE_DIR=/home/dhr/cv_final/data/scene_selected \
+OUTPUT_ROOT=/home/dhr/cv_final/data/scene_selected/vggt_dense_ablation_200k \
+STAGE=dense \
+VGGT_CACHE=/home/dhr/cv_final/data/scene_selected/vggt_improved/runs/20260629_125715_vggt_export/vggt_predictions.npz \
+INIT_POINTS_SOURCE=depth \
+ENABLE_POINT_HEAD=1 \
+DENSE_RECONSTRUCTION_VARIANTS=depth_only,pointmap_only,disagreement_only,reprojection_only,filtered_full \
+MAX_DENSE_POINTS=200000 \
+IMAGE_RESOLUTION=448 \
+bash scripts/vggt_export.sh
 ```
 
-## Metrics
+Selected-frame BA:
 
-- Frame selection: selected frame indices, centrality distribution, redundancy,
-  pose jump P90, final camera path visualization.
-- VGGT/BA: point count, observation count, RMSE, median, P90, removed outliers,
-  runtime.
-- Geometry filtering: dense pixels, finite points, retained ratio after each
-  filter, final sampled points, disagreement threshold, reprojection threshold,
-  neighbor-vote distribution.
-- 3DGS: PSNR, SSIM, LPIPS, training time, final Gaussian count, validation sheet,
-  visible floating artifacts.
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+INPUT_RECON=/home/dhr/cv_final/data/scene_selected/vggt_improved_depth/runs/<run>/reconstruction.npz \
+OUTPUT_ROOT=/home/dhr/cv_final/data/scene_selected/ba_custom_depth \
+MAX_NFEV=100 \
+bash scripts/ba_run.sh
+```
 
-## Priority
+Official 3DGS selected sparse raw / BA:
 
-1. Fill I1 selected-frame VGGT and BA statistics.
-2. Fill I2 dense filtering statistics and point-cloud screenshots.
-3. Run I2 depth-only / pointmap-only / filtered-depth 3DGS comparison.
-4. Run I3 full method against the existing uniform + BA baseline.
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+RECONSTRUCTION=/home/dhr/cv_final/data/scene_selected/vggt_improved_depth/runs/<run>/reconstruction.npz \
+IMAGE_DIR=/home/dhr/cv_final/data/scene_selected/images \
+OUTPUT_ROOT=/home/dhr/cv_final/data/scene_selected/gs_official_selected_raw \
+ITERATIONS=10000 RESOLUTION=768 SH_DEGREE=2 TEST_EVERY=8 \
+bash scripts/gs_train_official.sh
+
+CUDA_VISIBLE_DEVICES=0 \
+RECONSTRUCTION=/home/dhr/cv_final/data/scene_selected/ba_custom_depth/runs/<run>/reconstruction.npz \
+IMAGE_DIR=/home/dhr/cv_final/data/scene_selected/images \
+OUTPUT_ROOT=/home/dhr/cv_final/data/scene_selected/gs_official_selected_ba \
+ITERATIONS=10000 RESOLUTION=768 SH_DEGREE=2 TEST_EVERY=8 \
+bash scripts/gs_train_official.sh
+```
+
+Official 3DGS dense ablations:
+
+```bash
+for variant in depth_only pointmap_only disagreement_only reprojection_only filtered_full; do
+  CUDA_VISIBLE_DEVICES=6 \
+  RECONSTRUCTION=/home/dhr/cv_final/data/scene_selected/vggt_dense_ablation_200k/runs/20260629_152009_vggt_export/reconstruction_dense_${variant}.npz \
+  IMAGE_DIR=/home/dhr/cv_final/data/scene_selected/images \
+  OUTPUT_ROOT=/home/dhr/cv_final/data/scene_selected/gs_official_dense_${variant} \
+  ITERATIONS=10000 RESOLUTION=768 SH_DEGREE=2 TEST_EVERY=8 \
+  bash scripts/gs_train_official.sh
+done
+```
+
+Generate report metrics and image sheets from all completed runs:
+
+```bash
+bash scripts/report_assets.sh
+```
+
+Outputs:
+
+- `report/metrics/official_3dgs_metrics.csv`
+- `report/metrics/ba_metrics.csv`
+- `report/metrics/vggt_metrics.csv`
+- `report/metrics/custom_3dgs_metrics.csv`
+- `report/metrics/all_metrics.json`
+- `report/metrics/asset_audit.md`
+- `report/assets/scene_metric_bars.png`
+- `report/assets/selected_dense_metric_bars.png`
+- `report/assets/scene_main_render_comparison.png`
+- `report/assets/human_render_comparison.png`
+- `report/assets/selected_dense_render_comparison.png`
+
+## Acceptance Criteria
+
+- Existing tests pass: `PYTHONPATH=src:vggt python -m pytest src/tests/ -v`.
+- Every report claim points to an explicit run directory.
+- Every completed 3DGS experiment has `summary.json`, `results.json`,
+  `per_view.json`, and `test/ours_10000/{gt,renders}`.
+- Every dense ablation has `.npz`, `.ply`, and `geometry_filter_*_stats.json`.
+- `report/metrics/asset_audit.md` has no unexpected missing baseline outputs;
+  remaining warnings are only for intentionally pending improvement runs.

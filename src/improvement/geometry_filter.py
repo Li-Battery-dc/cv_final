@@ -208,44 +208,114 @@ def build_filtered_dense_reconstruction(
     rng: np.random.Generator | None = None,
     metadata: dict | None = None,
 ) -> GeometryFilterResult:
-    """Build a dense Reconstruction from depth points after adaptive filtering."""
+    """Build a dense Reconstruction from depth points after full adaptive filtering."""
+    return build_dense_reconstruction_variant(
+        image_names=image_names,
+        image_size_hw=image_size_hw,
+        intrinsics=intrinsics,
+        extrinsics=extrinsics,
+        depth_map=depth_map,
+        depth_conf=depth_conf,
+        points_depth=points_depth,
+        points_point=points_point,
+        images_np=images_np,
+        variant="filtered_full",
+        disagreement_percentile=disagreement_percentile,
+        reproj_percentile=reproj_percentile,
+        min_reproj_votes=min_reproj_votes,
+        max_points=max_points,
+        rng=rng,
+        metadata=metadata,
+    )
+
+
+def build_dense_reconstruction_variant(
+    *,
+    image_names: list[str] | np.ndarray,
+    image_size_hw: np.ndarray,
+    intrinsics: np.ndarray,
+    extrinsics: np.ndarray,
+    depth_map: np.ndarray,
+    depth_conf: np.ndarray | None,
+    points_depth: np.ndarray,
+    points_point: np.ndarray | None,
+    images_np: np.ndarray,
+    variant: str,
+    disagreement_percentile: float = 70.0,
+    reproj_percentile: float = 70.0,
+    min_reproj_votes: int = 1,
+    max_points: int = 200_000,
+    rng: np.random.Generator | None = None,
+    metadata: dict | None = None,
+) -> GeometryFilterResult:
+    """Build one report ablation dense Reconstruction.
+
+    Variants:
+        depth_only: depth/camera unprojection, no consistency filtering.
+        pointmap_only: VGGT direct point map, no consistency filtering.
+        disagreement_only: depth/camera points filtered by point-map disagreement.
+        reprojection_only: depth/camera points filtered by neighboring depth reprojection.
+        filtered_full: depth/camera points filtered by both checks.
+    """
+    valid_variants = {
+        "depth_only",
+        "pointmap_only",
+        "disagreement_only",
+        "reprojection_only",
+        "filtered_full",
+    }
+    if variant not in valid_variants:
+        raise ValueError(f"Unknown dense reconstruction variant {variant!r}; expected {sorted(valid_variants)}")
+
     depth = _as_depth_hw(depth_map)
     conf = _as_conf_hw(depth_conf, depth.shape)
     p_depth = _normalize_world_points(points_depth, depth.shape)
-    p_point = _normalize_world_points(points_point, depth.shape)
+    p_point = None if points_point is None else _normalize_world_points(points_point, depth.shape)
+    if variant in {"pointmap_only", "disagreement_only", "filtered_full"} and p_point is None:
+        raise ValueError(f"{variant} requires points_point from the VGGT point head")
     s_count, height, width = depth.shape
 
     flat_depth = p_depth.reshape(-1, 3)
-    flat_point = p_point.reshape(-1, 3)
+    flat_point = p_point.reshape(-1, 3) if p_point is not None else None
     flat_conf = conf.reshape(-1)
     source_frame_ids = np.repeat(np.arange(s_count, dtype=np.int32), height * width)
+    depth_flat = depth.reshape(-1)
 
-    finite = (
-        np.all(np.isfinite(flat_depth), axis=1)
-        & np.all(np.isfinite(flat_point), axis=1)
-        & np.isfinite(flat_conf)
-        & (depth.reshape(-1) > 1e-8)
-    )
-    disagreement = np.linalg.norm(flat_depth - flat_point, axis=1) / (
-        np.linalg.norm(flat_depth, axis=1) + 1e-8
-    )
-    finite &= np.isfinite(disagreement)
+    source_points = flat_point if variant == "pointmap_only" else flat_depth
+    finite = np.all(np.isfinite(source_points), axis=1) & np.isfinite(flat_conf) & (depth_flat > 1e-8)
+    if flat_point is not None:
+        finite &= np.all(np.isfinite(flat_point), axis=1)
+        disagreement = np.linalg.norm(flat_depth - flat_point, axis=1) / (
+            np.linalg.norm(flat_depth, axis=1) + 1e-8
+        )
+        finite &= np.isfinite(disagreement)
+    else:
+        disagreement = np.full(len(flat_depth), np.nan, dtype=np.float64)
 
-    if np.any(finite):
+    if flat_point is not None and np.any(finite):
         disagreement_threshold = float(np.percentile(disagreement[finite], disagreement_percentile))
     else:
         disagreement_threshold = float("inf")
-    keep = finite & (disagreement <= disagreement_threshold)
 
-    votes, valid_neighbor_counts, reproj_threshold = compute_reprojection_votes(
-        flat_depth,
-        source_frame_ids,
-        depth,
-        extrinsics,
-        intrinsics,
-        reproj_percentile=reproj_percentile,
-    )
-    keep &= votes >= int(min_reproj_votes)
+    keep = finite.copy()
+    if variant in {"disagreement_only", "filtered_full"}:
+        keep &= disagreement <= disagreement_threshold
+
+    needs_reprojection = variant in {"reprojection_only", "filtered_full"}
+    if needs_reprojection:
+        votes, valid_neighbor_counts, reproj_threshold = compute_reprojection_votes(
+            flat_depth,
+            source_frame_ids,
+            depth,
+            extrinsics,
+            intrinsics,
+            reproj_percentile=reproj_percentile,
+        )
+        keep &= votes >= int(min_reproj_votes)
+    else:
+        votes = np.zeros(len(flat_depth), dtype=np.int16)
+        valid_neighbor_counts = np.zeros(len(flat_depth), dtype=np.int16)
+        reproj_threshold = float("nan")
 
     kept_indices = np.flatnonzero(keep)
     rng = rng or np.random.default_rng(42)
@@ -255,7 +325,7 @@ def build_filtered_dense_reconstruction(
         kept_indices = rng.choice(kept_indices, size=max_points, replace=False, p=weights)
         kept_indices = np.sort(kept_indices)
 
-    points3d = flat_depth[kept_indices].astype(np.float64)
+    points3d = source_points[kept_indices].astype(np.float64)
     points_rgb = _sample_rgb(images_np, height, width)[kept_indices]
     points_conf = flat_conf[kept_indices].astype(np.float32)
 
@@ -273,9 +343,26 @@ def build_filtered_dense_reconstruction(
         obs_conf=np.zeros(0, dtype=np.float32),
         metadata=dict(metadata or {}),
     )
+    point_source = {
+        "depth_only": "depth_camera_unprojection",
+        "pointmap_only": "direct_vggt_point_map",
+        "disagreement_only": "depth_camera_unprojection_disagreement_filtered",
+        "reprojection_only": "depth_camera_unprojection_reprojection_filtered",
+        "filtered_full": "depth_camera_unprojection_filtered",
+    }[variant]
+    if flat_point is None:
+        point_map_role = "none"
+    elif variant == "pointmap_only":
+        point_map_role = "main_output"
+    elif variant in {"disagreement_only", "filtered_full"}:
+        point_map_role = "consistency_check_only"
+    else:
+        point_map_role = "unused"
+
     recon.metadata.update({
-        "point_source": "depth_camera_unprojection_filtered",
-        "point_map_role": "consistency_check_only",
+        "point_source": point_source,
+        "dense_variant": variant,
+        "point_map_role": point_map_role,
         "dense_filter_disagreement_percentile": float(disagreement_percentile),
         "dense_filter_disagreement_threshold": disagreement_threshold,
         "dense_filter_reproj_percentile": float(reproj_percentile),
@@ -285,6 +372,7 @@ def build_filtered_dense_reconstruction(
     })
 
     stats = {
+        "variant": variant,
         "total_pixels": int(flat_depth.shape[0]),
         "finite_points": int(np.sum(finite)),
         "after_disagreement": int(np.sum(finite & (disagreement <= disagreement_threshold))),
@@ -298,6 +386,11 @@ def build_filtered_dense_reconstruction(
         "points_with_valid_neighbors": int(np.sum(valid_neighbor_counts > 0)),
         "mean_reproj_votes_kept": float(np.mean(votes[kept_indices])) if len(kept_indices) else 0.0,
     }
+    if variant in {"depth_only", "pointmap_only", "reprojection_only"}:
+        stats["after_disagreement"] = int(np.sum(finite))
+        stats["after_reprojection"] = int(np.sum(keep))
+    elif variant == "disagreement_only":
+        stats["after_reprojection"] = int(np.sum(keep))
     return GeometryFilterResult(reconstruction=recon, stats=stats, keep_mask=keep)
 
 
@@ -307,4 +400,3 @@ def save_dense_ply(path: str, points3d: np.ndarray, points_rgb: np.ndarray) -> s
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     trimesh.PointCloud(points3d, colors=points_rgb).export(path)
     return path
-

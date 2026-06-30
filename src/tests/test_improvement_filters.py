@@ -4,7 +4,10 @@ import tempfile
 import cv2
 import numpy as np
 
-from src.improvement.geometry_filter import build_filtered_dense_reconstruction
+from src.improvement.geometry_filter import (
+    build_dense_reconstruction_variant,
+    build_filtered_dense_reconstruction,
+)
 from src.improvement.video_select import scan_video, select_candidates
 
 
@@ -59,6 +62,36 @@ def test_geometry_filter_builds_dense_reconstruction_without_observations():
     assert recon.metadata["point_source"] == "depth_camera_unprojection_filtered"
 
 
+def test_dense_ablation_variants_build_valid_reconstructions():
+    depth, extrinsics, intrinsics, points_depth, points_point, images = _simple_reconstruction_inputs()
+
+    for variant in ("depth_only", "pointmap_only", "disagreement_only", "reprojection_only", "filtered_full"):
+        result = build_dense_reconstruction_variant(
+            image_names=["a.jpg", "b.jpg"],
+            image_size_hw=np.array([[4, 4], [4, 4]], dtype=np.int32),
+            intrinsics=intrinsics,
+            extrinsics=extrinsics,
+            depth_map=depth,
+            depth_conf=np.ones((2, 4, 4), dtype=np.float32),
+            points_depth=points_depth,
+            points_point=points_point,
+            images_np=images,
+            variant=variant,
+            disagreement_percentile=80,
+            reproj_percentile=100,
+            min_reproj_votes=1,
+            max_points=100,
+            rng=np.random.default_rng(0),
+        )
+
+        recon = result.reconstruction
+        assert recon.num_images == 2
+        assert recon.num_points > 0
+        assert recon.num_observations == 0
+        assert recon.metadata["dense_variant"] == variant
+        assert result.stats["variant"] == variant
+
+
 def test_video_scan_and_candidate_selection_without_ffmpeg():
     with tempfile.TemporaryDirectory() as tmpdir:
         video_path = os.path.join(tmpdir, "tiny.mp4")
@@ -82,4 +115,3 @@ def test_video_scan_and_candidate_selection_without_ffmpeg():
     assert fps > 0
     assert len(selected) == 4
     assert selected == sorted(selected)
-

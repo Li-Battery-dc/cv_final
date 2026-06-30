@@ -1,0 +1,5 @@
+run_id,scene,images,track_points,observations,dense_points,vggt_inference_seconds,track_prediction_seconds,run_dir
+scene_vggt_raw,scene,64,9760,116725,,19.68219828605652,34.11741518974304,/home/dhr/cv_final/data/scene/vggt_raw/runs/20260627_074913_vggt_export
+human1_vggt_hq,1-human,16,18183,138917,,,40.8187153339386,/home/dhr/cv_final/data/1-human/vggt_raw_hq_unmasked/runs/20260629_083702_vggt_export
+human2_vggt_hq,2-human,16,17678,143966,,,36.43709635734558,/home/dhr/cv_final/data/2-human/vggt_raw_hq_unmasked/runs/20260629_084616_vggt_export
+scene32_vggt_hq,scene_32,32,16405,109823,,,45.36200499534607,/home/dhr/cv_final/data/scene_32/vggt_raw_hq_768/runs/20260629_091545_vggt_export

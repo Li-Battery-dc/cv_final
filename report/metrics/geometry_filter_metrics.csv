@@ -1,0 +1,6 @@
+run_id,variant,total_pixels,finite_points,after_disagreement,after_reprojection,output_points,disagreement_threshold,reproj_threshold,points_with_valid_neighbors,mean_reproj_votes_kept,run_dir
+20260629_152009_vggt_export,depth_only,17172736,17172736,17172736,17172736,200000,0.029665415333377226,nan,0,0.0,/home/dhr/cv_final/data/scene_selected/vggt_dense_ablation_200k/runs/20260629_152009_vggt_export
+20260629_152009_vggt_export,disagreement_only,17172736,17172736,12020915,12020915,200000,0.029665415333377226,nan,0,0.0,/home/dhr/cv_final/data/scene_selected/vggt_dense_ablation_200k/runs/20260629_152009_vggt_export
+20260629_152009_vggt_export,filtered_full,17172736,17172736,12020915,11068970,200000,0.029665415333377226,0.014023505851321562,17080831,3.23486,/home/dhr/cv_final/data/scene_selected/vggt_dense_ablation_200k/runs/20260629_152009_vggt_export
+20260629_152009_vggt_export,pointmap_only,17172736,17172736,17172736,17172736,200000,0.029665415333377226,nan,0,0.0,/home/dhr/cv_final/data/scene_selected/vggt_dense_ablation_200k/runs/20260629_152009_vggt_export
+20260629_152009_vggt_export,reprojection_only,17172736,17172736,17172736,14513982,200000,0.029665415333377226,0.014023505851321562,17080831,3.086535,/home/dhr/cv_final/data/scene_selected/vggt_dense_ablation_200k/runs/20260629_152009_vggt_export

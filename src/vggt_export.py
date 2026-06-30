@@ -51,6 +51,7 @@ from src.data.reconstruction import Reconstruction
 from src.data.mask_filter import filter_reconstruction_by_masks
 from src.data.colmap_io import reconstruction_to_colmap_space, reconstruction_to_colmap_sparse
 from src.improvement.geometry_filter import (
+    build_dense_reconstruction_variant,
     build_filtered_dense_reconstruction,
     save_dense_ply,
 )
@@ -72,8 +73,8 @@ def parse_args():
                         help="Optional explicit output run directory")
     parser.add_argument("--use_timestamp", action=argparse.BooleanOptionalAction, default=True,
                         help="If true, save to output_dir/runs/<timestamp>_vggt_export")
-    parser.add_argument("--stage", type=str, default="all", choices=("all", "vggt", "tracks"),
-                        help="Run full pipeline, VGGT-only cache export, or tracks/reconstruction from cache.")
+    parser.add_argument("--stage", type=str, default="all", choices=("all", "vggt", "tracks", "dense"),
+                        help="Run full pipeline, VGGT-only cache export, tracks/reconstruction from cache, or dense variants from cache.")
     parser.add_argument("--vggt_cache", type=str, default=None,
                         help="Path to VGGT cache .npz. Defaults to output_dir/vggt_predictions.npz")
     parser.add_argument("--seed", type=int, default=42)
@@ -106,6 +107,12 @@ def parse_args():
                         help="Also run VGGT direct point-map head for geometry consistency checks")
     parser.add_argument("--save_dense_filtered_reconstruction", action="store_true", default=False,
                         help="Save a depth-camera dense Reconstruction filtered by point-map and reprojection consistency")
+    parser.add_argument("--dense_reconstruction_variants", type=str, default="",
+                        help=(
+                            "Comma-separated dense ablation variants to export: "
+                            "depth_only,pointmap_only,disagreement_only,reprojection_only,filtered_full. "
+                            "--save_dense_filtered_reconstruction adds filtered_full for backward compatibility."
+                        ))
     parser.add_argument("--dense_filter_disagreement_percentile", type=float, default=70.0,
                         help="Keep depth/point-map disagreement below this scene percentile")
     parser.add_argument("--dense_filter_reproj_percentile", type=float, default=70.0,
@@ -277,6 +284,29 @@ def load_vggt_cache(path):
     }
 
 
+def parse_dense_variants(args) -> list[str]:
+    """Return canonical dense reconstruction variants requested by the run."""
+    valid = {
+        "depth_only",
+        "pointmap_only",
+        "disagreement_only",
+        "reprojection_only",
+        "filtered_full",
+    }
+    variants = []
+    if args.dense_reconstruction_variants.strip():
+        for raw in args.dense_reconstruction_variants.split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            if name not in valid:
+                raise ValueError(f"Unknown dense reconstruction variant {name!r}; expected {sorted(valid)}")
+            variants.append(name)
+    if args.save_dense_filtered_reconstruction:
+        variants.append("filtered_full")
+    return sorted(dict.fromkeys(variants))
+
+
 def export_reconstruction_outputs(recon, original_coords_np, img_load_resolution,
                                   output_dir, camera_type):
     """Save Reconstruction .npz and COLMAP sparse model."""
@@ -291,20 +321,116 @@ def export_reconstruction_outputs(recon, original_coords_np, img_load_resolution
     return npz_path, sparse_dir
 
 
+def export_dense_reconstruction_variants(
+    *,
+    variants: list[str],
+    image_names: list[str],
+    image_size_hw: np.ndarray,
+    intrinsic: np.ndarray,
+    intrinsic_scaled: np.ndarray,
+    extrinsic: np.ndarray,
+    depth_map: np.ndarray,
+    depth_conf: np.ndarray,
+    points_3d_dense: np.ndarray,
+    point_map: np.ndarray | None,
+    images_np: np.ndarray,
+    original_coords_np: np.ndarray,
+    args,
+    output_dir: str,
+    vggt_cache: str,
+) -> dict[str, dict]:
+    """Export requested dense ablation Reconstructions and PLY files."""
+    outputs: dict[str, dict] = {}
+    if not variants:
+        return outputs
+
+    t0 = time.time()
+    for variant in variants:
+        print(f"Building dense reconstruction variant: {variant}")
+        dense_result = build_dense_reconstruction_variant(
+            image_names=image_names,
+            image_size_hw=image_size_hw,
+            intrinsics=intrinsic,
+            extrinsics=extrinsic,
+            depth_map=depth_map,
+            depth_conf=depth_conf,
+            points_depth=points_3d_dense,
+            points_point=point_map,
+            images_np=images_np,
+            variant=variant,
+            disagreement_percentile=args.dense_filter_disagreement_percentile,
+            reproj_percentile=args.dense_filter_reproj_percentile,
+            min_reproj_votes=args.dense_filter_min_votes,
+            max_points=args.max_dense_points,
+            rng=np.random.default_rng(args.seed),
+            metadata={
+                "original_coords": original_coords_np,
+                "img_load_resolution": args.img_load_resolution,
+                "vggt_resolution": args.vggt_resolution,
+                "vggt_cache": vggt_cache,
+                "run_stage": f"vggt_export_dense_{variant}",
+                "run_timestamp_utc": utc_timestamp(),
+            },
+        )
+        dense_result.reconstruction.intrinsics = intrinsic_scaled.copy()
+        dense_result.reconstruction.metadata["filter_intrinsics_space"] = "vggt_resolution"
+        dense_result.reconstruction.metadata["output_intrinsics_space"] = "img_load_resolution"
+
+        npz_path = os.path.join(output_dir, f"reconstruction_dense_{variant}.npz")
+        ply_path = os.path.join(output_dir, f"points3d_dense_{variant}.ply")
+        stats_path = os.path.join(output_dir, f"geometry_filter_{variant}_stats.json")
+        dense_result.reconstruction.to_npz(npz_path)
+        save_dense_ply(
+            ply_path,
+            dense_result.reconstruction.points3d,
+            dense_result.reconstruction.points_rgb,
+        )
+        save_json(stats_path, dense_result.stats)
+
+        outputs[variant] = {
+            "npz": npz_path,
+            "ply": ply_path,
+            "stats": stats_path,
+            "points": dense_result.reconstruction.num_points,
+            "filter": dense_result.stats,
+        }
+        print(f"  {variant}: {dense_result.reconstruction.num_points} pts -> {npz_path}")
+
+        if variant == "filtered_full":
+            legacy_npz = os.path.join(output_dir, "reconstruction_dense_filtered.npz")
+            legacy_ply = os.path.join(output_dir, "points3d_dense_filtered.ply")
+            legacy_stats = os.path.join(output_dir, "geometry_filter_stats.json")
+            dense_result.reconstruction.to_npz(legacy_npz)
+            save_dense_ply(
+                legacy_ply,
+                dense_result.reconstruction.points3d,
+                dense_result.reconstruction.points_rgb,
+            )
+            save_json(legacy_stats, dense_result.stats)
+            outputs[variant].update({
+                "legacy_npz": legacy_npz,
+                "legacy_ply": legacy_ply,
+                "legacy_stats": legacy_stats,
+            })
+
+    outputs["_time_seconds"] = time.time() - t0
+    return outputs
+
+
 def main():
     args = parse_args()
     set_seed(args.seed)
+    dense_variants = parse_dense_variants(args)
+    point_head_variants = {"pointmap_only", "disagreement_only", "filtered_full"}
+    dense_variants_require_point_head = bool(point_head_variants.intersection(dense_variants))
     run_point_head = (
         args.enable_point_head
-        or args.save_dense_filtered_reconstruction
+        or dense_variants_require_point_head
         or args.init_points_source == "point_head"
     )
     stage_times = {}
     dense_count = None
-    dense_filtered_count = None
-    dense_filtered_npz_path = None
-    dense_filtered_ply_path = None
-    dense_filter_stats = None
+    dense_outputs = {}
     ply_path = None
     npz_path = None
     sparse_dir = None
@@ -338,6 +464,7 @@ def main():
             **vars(args),
             "point_head_effective": run_point_head,
             "sparse_init_points_source": args.init_points_source,
+            "dense_variants": dense_variants,
         },
         inputs={
             "scene_dir": scene_dir,
@@ -408,6 +535,7 @@ def main():
                 "dense_points": dense_count,
                 "point_head_effective": run_point_head,
                 "sparse_init_points_source": args.init_points_source,
+                "dense_variants": dense_variants,
                 "vggt_cache": vggt_cache,
                 "output_ply": ply_path,
                 **stage_times,
@@ -440,11 +568,63 @@ def main():
         frame_features = cache.get("frame_features")
         point_map = cache.get("point_map")
         point_conf = cache.get("point_conf")
-        if args.save_dense_filtered_reconstruction and point_map is None:
+        if dense_variants_require_point_head and point_map is None:
             raise ValueError(
                 "VGGT cache has no point_map. Re-run --stage vggt/all with --enable_point_head "
-                "before requesting --save_dense_filtered_reconstruction."
+                "before requesting point-map dense ablation variants."
             )
+
+    if args.stage == "dense":
+        if not dense_variants:
+            raise ValueError("--stage dense requires --dense_reconstruction_variants or --save_dense_filtered_reconstruction")
+        scale = args.img_load_resolution / args.vggt_resolution
+        intrinsic_scaled = intrinsic.copy()
+        intrinsic_scaled[:, :2, :] *= scale
+        images_vggt = F.interpolate(images, size=(args.vggt_resolution, args.vggt_resolution),
+                                    mode="bilinear", align_corners=False)
+        images_np = (images_vggt.detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        images_np = images_np.transpose(0, 2, 3, 1)
+        dense_outputs = export_dense_reconstruction_variants(
+            variants=dense_variants,
+            image_names=image_names,
+            image_size_hw=image_size_hw,
+            intrinsic=intrinsic,
+            intrinsic_scaled=intrinsic_scaled,
+            extrinsic=extrinsic,
+            depth_map=depth_map,
+            depth_conf=depth_conf,
+            points_3d_dense=points_3d_dense,
+            point_map=point_map,
+            images_np=images_np,
+            original_coords_np=original_coords_np,
+            args=args,
+            output_dir=output_dir,
+            vggt_cache=vggt_cache,
+        )
+        stage_times['dense_geometry_export_seconds'] = dense_outputs.pop("_time_seconds", 0.0)
+        save_json(os.path.join(output_dir, "summary.json"), {
+            "stage": args.stage,
+            "timestamp_utc": utc_timestamp(),
+            "images": S,
+            "sparse_init_points_source": args.init_points_source,
+            "point_head_effective": point_map is not None,
+            "vggt_cache": vggt_cache,
+            "dense_variants": dense_outputs,
+            "dense_filtered_npz": dense_outputs.get("filtered_full", {}).get("legacy_npz"),
+            "dense_filtered_ply": dense_outputs.get("filtered_full", {}).get("legacy_ply"),
+            "dense_filtered_points": dense_outputs.get("filtered_full", {}).get("points"),
+            "dense_filter": dense_outputs.get("filtered_full", {}).get("filter"),
+            **stage_times,
+        })
+        print("\n" + "=" * 60)
+        print("VGGT Dense Export Summary")
+        print("=" * 60)
+        print(f"  Images:         {S}")
+        print(f"  VGGT cache:     {vggt_cache}")
+        print("  Dense variants: " + ", ".join(f"{name}={info['points']}" for name, info in dense_outputs.items()))
+        print(f"  Output dir:     {output_dir}")
+        print("=" * 60)
+        return 0
 
     if args.init_points_source == "point_head":
         if point_map is None:
@@ -501,58 +681,32 @@ def main():
     )
     print(f"Reconstruction: {recon}")
 
-    if args.save_dense_filtered_reconstruction:
-        if point_map is None:
-            raise ValueError("--save_dense_filtered_reconstruction requires --enable_point_head")
-        print("Building filtered dense depth-camera reconstruction...")
-        t0 = time.time()
+    if dense_variants:
+        if dense_variants_require_point_head and point_map is None:
+            raise ValueError("Requested dense variants require --enable_point_head or a cache with point_map")
+        print(f"Building dense reconstruction variants: {', '.join(dense_variants)}")
         images_vggt = F.interpolate(images, size=(args.vggt_resolution, args.vggt_resolution),
                                     mode="bilinear", align_corners=False)
         images_np = (images_vggt.detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
         images_np = images_np.transpose(0, 2, 3, 1)
-        dense_result = build_filtered_dense_reconstruction(
+        dense_outputs = export_dense_reconstruction_variants(
+            variants=dense_variants,
             image_names=image_names,
             image_size_hw=image_size_hw,
-            intrinsics=intrinsic,
-            extrinsics=extrinsic,
+            intrinsic=intrinsic,
+            intrinsic_scaled=intrinsic_scaled,
+            extrinsic=extrinsic,
             depth_map=depth_map,
             depth_conf=depth_conf,
-            points_depth=points_3d_dense,
-            points_point=point_map,
+            points_3d_dense=points_3d_dense,
+            point_map=point_map,
             images_np=images_np,
-            disagreement_percentile=args.dense_filter_disagreement_percentile,
-            reproj_percentile=args.dense_filter_reproj_percentile,
-            min_reproj_votes=args.dense_filter_min_votes,
-            max_points=args.max_dense_points,
-            rng=np.random.default_rng(args.seed),
-            metadata={
-                "original_coords": original_coords_np,
-                "img_load_resolution": args.img_load_resolution,
-                "vggt_resolution": args.vggt_resolution,
-                "vggt_cache": vggt_cache,
-                "run_stage": "vggt_export_dense_filtered",
-                "run_timestamp_utc": utc_timestamp(),
-            },
+            original_coords_np=original_coords_np,
+            args=args,
+            output_dir=output_dir,
+            vggt_cache=vggt_cache,
         )
-        dense_result.reconstruction.intrinsics = intrinsic_scaled.copy()
-        dense_result.reconstruction.metadata["filter_intrinsics_space"] = "vggt_resolution"
-        dense_result.reconstruction.metadata["output_intrinsics_space"] = "img_load_resolution"
-        dense_filtered_npz_path = os.path.join(output_dir, "reconstruction_dense_filtered.npz")
-        dense_result.reconstruction.to_npz(dense_filtered_npz_path)
-        dense_filtered_ply_path = os.path.join(output_dir, "points3d_dense_filtered.ply")
-        save_dense_ply(
-            dense_filtered_ply_path,
-            dense_result.reconstruction.points3d,
-            dense_result.reconstruction.points_rgb,
-        )
-        dense_filter_stats = dense_result.stats
-        dense_filtered_count = dense_result.reconstruction.num_points
-        save_json(os.path.join(output_dir, "geometry_filter_stats.json"), dense_filter_stats)
-        stage_times['dense_geometry_filter_seconds'] = time.time() - t0
-        print(
-            f"Filtered dense reconstruction: {dense_filtered_count} pts -> "
-            f"{dense_filtered_npz_path}"
-        )
+        stage_times['dense_geometry_export_seconds'] = dense_outputs.pop("_time_seconds", 0.0)
 
     mask_filter_stats = None
     if args.mask_dir:
@@ -580,8 +734,13 @@ def main():
         recon.metadata['frame_features_in_cache'] = True
     if point_map is not None:
         recon.metadata['point_map_in_cache'] = True
-    if dense_filtered_npz_path:
-        recon.metadata['dense_filtered_reconstruction'] = dense_filtered_npz_path
+    if dense_outputs:
+        recon.metadata['dense_reconstruction_variants'] = dense_outputs
+        if "filtered_full" in dense_outputs:
+            recon.metadata['dense_filtered_reconstruction'] = dense_outputs["filtered_full"].get(
+                "legacy_npz",
+                dense_outputs["filtered_full"]["npz"],
+            )
     recon.metadata['run_stage'] = 'vggt_export'
     recon.metadata['run_timestamp_utc'] = utc_timestamp()
     recon.metadata['run_config_path'] = config_path
@@ -599,8 +758,9 @@ def main():
     print(f"  Observations:     {recon.num_observations}")
     print(f"  Init point source: {args.init_points_source}")
     print(f"  VGGT cache:       {vggt_cache}")
-    if dense_filtered_npz_path:
-        print(f"  Dense filtered:   {dense_filtered_count} pts")
+    if dense_outputs:
+        dense_counts = ", ".join(f"{name}={info['points']}" for name, info in dense_outputs.items())
+        print(f"  Dense variants:   {dense_counts}")
     print(f"  Output .npz:      {npz_path}")
     print(f"  Output COLMAP:    {sparse_dir}")
     print("=" * 60)
@@ -615,10 +775,11 @@ def main():
         "vggt_cache": vggt_cache,
         "output_npz": npz_path,
         "output_colmap": sparse_dir,
-        "dense_filtered_npz": dense_filtered_npz_path,
-        "dense_filtered_ply": dense_filtered_ply_path,
-        "dense_filtered_points": dense_filtered_count,
-        "dense_filter": dense_filter_stats,
+        "dense_variants": dense_outputs,
+        "dense_filtered_npz": dense_outputs.get("filtered_full", {}).get("legacy_npz"),
+        "dense_filtered_ply": dense_outputs.get("filtered_full", {}).get("legacy_ply"),
+        "dense_filtered_points": dense_outputs.get("filtered_full", {}).get("points"),
+        "dense_filter": dense_outputs.get("filtered_full", {}).get("filter"),
         "mask_filter": mask_filter_stats,
         **stage_times,
     })
