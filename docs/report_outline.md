@@ -16,18 +16,23 @@
 - 说明 3DGS 作用：用优化后的相机和点云初始化高斯，训练可实时交互渲染的场景表示。
 - 说明改进实验作用：在 frozen VGGT 上做训练-free 改进，评估能否提高重建质量或速度。
 
-## 3. 数据格式与坐标约定
+## 3. 统一重建表示与评价指标
 
-- 简单说明统一化设计思路使用 `Reconstruction` 字段：`image_names`、`image_size_hw`、`intrinsics`、`extrinsics`、`points3d`、`points_rgb`、`obs_*`。
-- 说明 BA 观测图的构成：`obs_camera_id`、`obs_point_id`、`obs_xy`、`obs_conf` 是 flat observation graph。。
-- 可能必要补充的整体设计逻辑
+- 不只是列数据字段，要说明统一 `Reconstruction` 的设计目的：让 VGGT、BA 和 3DGS 在同一套相机、点云和观测图定义下衔接，便于做公平实验比较。
+- 说明三类核心内容：图像和相机、三维结构、多视角观测图。
+- 保留字段表：`image_names`、`image_size_hw`、`intrinsics`、`extrinsics`、`points3d`、`points_rgb`、`obs_camera_id`、`obs_point_id`、`obs_xy`、`obs_conf`。
+- 说明坐标约定：OpenCV camera-from-world，`X_cam = R X_world + t`。
+- 增加重投影公式：`u_hat = pi(K, R X + t)`，`e = ||u_hat - u||_2`。
+- 定义后文统一使用的 RMSE、Median、P90。说明 RMSE 对大误差敏感，Median 表示典型观测误差，P90 表示长尾离群误差。
+- 强调这些指标是自监督几何一致性指标，不需要真实标定，但不能完全等同于最终 3DGS 视觉质量。
 
 ## 4. VGGT 初始重建
 
-- 简要讲解VGGT的原理和思路，在项目中发挥的作用。
-- 说明 VGGT export 的阶段和作用讲解，做了 inference、track prediction、可见性过滤、重投影过滤和 `.npz` 导出。
-- 说明VGGT重建使用的评估指标VGGT tracks 的多视角重投影误差评估相机和点云一致性。
-- 在三个场景中的运行结果：1-human, 2-human, scene. 包括结果信息数据。
+- 补充原始文献引用：Wang 等，*VGGT: Visual Geometry Grounded Transformer*, CVPR 2025。
+- 简要讲解 VGGT 的原理和思路：多视角图像整体输入，Transformer 聚合跨视角特征，预测相机、深度、点图和 tracks，作为无标定重建初值。
+- 说明项目中的使用方式：frozen VGGT 初始化，不训练或微调；得到相机和点云后再进行 track prediction、可见性过滤和重投影过滤。
+- 先展示大作业要求的 `1-human`、`2-human` 和 `scene` 三组初始重建结果。展示图像数、tracking 设置、点数、观测数和 VGGT raw 重投影 RMSE / Median / P90，并引用第 3 节的指标定义。
+- 补充 `scene_32` 显存负结果：从 64 帧抽到 32 帧后可以把 `MAX_QUERY_PTS` 从 512 提高到 768，但最终 3DGS 效果低于 64 帧主场景，说明更多 tracks 不能替代充分视角覆盖。
 
 ## 5. 自实现 Bundle Adjustment
 
@@ -60,10 +65,10 @@ Human 场景修复实验
 - 基本流程：使用 mask 白底合成，按 mask 过滤初始化点。初期运行效果较差。后续提升了VGGSFM的tracks数量。
 - 说明关键发现：human 提升的主因是高密度 VGGSfM tracks，而不是 mask 本身。但是受限于硬件显存没办法进一步提升获得很好的结果。
 - 展示两个human场景下的运行结果数值和最终render出的结果对比。
-    - 写入 `1-human` 高密度 BA：18,162 点、137,280 观测、RMSE 3.39 -> 1.53、P90 5.86 -> 2.52、BA 195.6s。
-    - 写入 `2-human` 高密度 BA：17,677 点、142,740 观测、RMSE 3.07 -> 1.36、P90 5.27 -> 2.21、BA 153.0s。
-    - 写入 `1-human` final render：8 个 test views，PSNR 26.44、SSIM 0.959、LPIPS 0.031。
-    - 写入 `2-human` final render：8 个 test views，PSNR 28.62、SSIM 0.968、LPIPS 0.024。
+    - 写入 `1-human` 高密度 BA：`[PLACEHOLDER: no-filter rerun]`。
+    - 写入 `2-human` 高密度 BA：`[PLACEHOLDER: no-filter rerun]`。
+    - 写入 `1-human` final render：`[PLACEHOLDER: no-filter rerun]`。
+    - 写入 `2-human` final render：`[PLACEHOLDER: no-filter rerun]`。
 
 ### 3D GS不同效果对比 
 
@@ -120,7 +125,7 @@ Human 场景修复实验
 
 - 写明端到端系统已经完成：VGGT 初始重建、自实现 BA、3DGS 训练评估和 viewer。
 - 写明最重要结论：custom BA 在主场景上显著降低重投影误差并提升 3DGS 渲染质量。
-- 写明主定量结论：`scene` 的 RMSE 3.82 -> 1.58，PSNR 20.73 -> 22.47。
+- 写明主定量结论：`scene` 的 `[PLACEHOLDER: raw RMSE] -> [PLACEHOLDER: BA RMSE]`，`[PLACEHOLDER: raw PSNR] -> [PLACEHOLDER: BA PSNR]`。
 - 写明 human 结论：高密度 tracks 加 mask-white split 可获得稳定 human 展示结果。
 - 写明 VGGT 改进结论占位：根据 I1-I4 最终结果填写“有效提升”或“负结果但提供分析”。
 

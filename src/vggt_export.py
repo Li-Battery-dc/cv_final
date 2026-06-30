@@ -16,7 +16,7 @@ Usage:
         --max_query_pts 2048 \
         --query_frame_num 5 \
         --vis_thresh 0.2 \
-        --max_reproj_error 8.0 \
+        --max_reproj_error 0.0 \
         --min_visible_frames 3
 """
 
@@ -88,8 +88,8 @@ def parse_args():
                         help="Number of query frames")
     parser.add_argument("--vis_thresh", type=float, default=0.2,
                         help="Visibility threshold for track filtering")
-    parser.add_argument("--max_reproj_error", type=float, default=8.0,
-                        help="Max reprojection error for BA inlier filtering")
+    parser.add_argument("--max_reproj_error", type=float, default=0.0,
+                        help="Max reprojection error for VGGT track pre-filtering; <=0 disables this filter")
     parser.add_argument("--min_visible_frames", type=int, default=3,
                         help="Min frames a point must be visible in")
     parser.add_argument("--fine_tracking", action=argparse.BooleanOptionalAction, default=True,

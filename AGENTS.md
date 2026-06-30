@@ -94,7 +94,7 @@ python scripts/vggt_export.py \
   --max_query_pts 2048 \
   --query_frame_num 5 \
   --vis_thresh 0.2 \
-  --max_reproj_error 8.0 \
+  --max_reproj_error 0.0 \
   --min_visible_frames 3
 ```
 
