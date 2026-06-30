@@ -46,7 +46,6 @@ SELECTED_OFFICIAL_NOTES = {
 
 BA_RUNS = [
     RunSpec("scene_ba", "scene", "ba_custom", "data/scene/ba_custom/runs/20260627_075839_ba_custom"),
-    RunSpec("scene_pycolmap_ba", "scene", "ba_pycolmap", "data/scene/ba_pycolmap/runs/20260627_080613_ba_pycolmap"),
     RunSpec("human1_ba_hq", "1-human", "ba_custom", "data/1-human/ba_custom_hq/runs/20260629_083912_ba_custom"),
     RunSpec("human2_ba_hq", "2-human", "ba_custom", "data/2-human/ba_custom_hq/runs/20260629_084714_ba_custom"),
     RunSpec("scene32_ba_hq", "scene_32", "ba_custom", "data/scene_32/ba_custom_hq_768/runs/20260629_091651_ba_custom"),

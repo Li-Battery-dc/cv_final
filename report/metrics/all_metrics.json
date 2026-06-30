@@ -164,24 +164,6 @@
       "time_seconds": 122.09953904151917
     },
     {
-      "run_id": "scene_pycolmap_ba",
-      "scene": "scene",
-      "kind": "ba_pycolmap",
-      "run_dir": "/home/dhr/cv_final/data/scene/ba_pycolmap/runs/20260627_080613_ba_pycolmap",
-      "rmse_before": 3.8161120673535738,
-      "rmse_after": 1.2660810855164677,
-      "median_before": 2.801217847116603,
-      "median_after": 0.5336568246304434,
-      "p90_before": 6.42306894824171,
-      "p90_after": 2.0719107417187135,
-      "n_outliers_removed": 4267,
-      "n_points_before": 9760,
-      "n_points_after": 9654,
-      "n_obs_before": 116725,
-      "n_obs_after": 112404,
-      "time_seconds": 36.953218936920166
-    },
-    {
       "run_id": "human1_ba_hq",
       "scene": "1-human",
       "kind": "ba_custom",

@@ -33,7 +33,6 @@ Typical stage roots:
 
 - `data/scene/vggt_raw`
 - `data/scene/ba_custom`
-- `data/scene/ba_pycolmap`
 - `data/scene/gs_custom_ba`
 
 ## Stage Layout
@@ -81,21 +80,7 @@ Current solver:
 - two rounds with optional outlier filtering
 - first two cameras fixed as gauge anchor
 
-### 3. PyCOLMAP BA baseline
-
-Main code:
-
-- [src/ba/pycolmap_run.py](/home/dhr/cv_final/src/ba/pycolmap_run.py)
-- [scripts/ba_pycolmap.sh](/home/dhr/cv_final/scripts/ba_pycolmap.sh)
-
-Notes:
-
-- Uses PyCOLMAP + Ceres as a stronger BA baseline.
-- Keeps first two camera poses fixed.
-- Keeps intrinsics fixed by default.
-- Supports an optional second round after outlier filtering.
-
-### 4. Custom Gaussian Splatting
+### 3. Custom Gaussian Splatting
 
 Main code:
 
@@ -119,7 +104,7 @@ Recent implementation updates:
 - Resume now continues from the stored iteration instead of restarting from 1.
 - Added `init_mode=random` for a random-initialization baseline.
 
-### 5. Official 3DGS baseline wrapper
+### 4. Official 3DGS baseline wrapper
 
 Main code:
 
@@ -130,7 +115,6 @@ Main code:
 External sources:
 
 - `gaussian-splatting`
-- `packages/pycolmap`
 
 The wrapper keeps the project handoff format as `reconstruction.npz`. It uses
 the project environment to convert `Reconstruction` into a temporary
